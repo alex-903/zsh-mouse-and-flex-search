@@ -115,7 +115,9 @@ class RawTerminal:
             termios.tcflush(self.fd, termios.TCIFLUSH)
         except termios.error:
             pass
-        term_write(ENABLE_MOUSE)
+        # Start with mouse reporting disabled; it will be enabled lazily
+        # once the user types the first character in the query.
+        term_write(DISABLE_MOUSE)
         # Keep the terminal's default cursor visible while editing input.
         term_write(SHOW_CURSOR)
         term_flush()
@@ -619,6 +621,7 @@ def run(history: list[str], *, inline_with_prompt: bool = False) -> Optional[str
             chosen: Optional[str] = None
             query_start = 0
             mouse_selecting = False
+            mouse_enabled = False
             last_left_click_time = 0.0
             last_left_click_row = -1
             last_left_click_col = -1
@@ -791,6 +794,10 @@ def run(history: list[str], *, inline_with_prompt: bool = False) -> Optional[str
                     offset = 0
                     continue
                 if ev == "char":
+                    if not mouse_enabled:
+                        term_write(ENABLE_MOUSE)
+                        term_flush()
+                        mouse_enabled = True
                     ch = str(payload)
                     sel = selection_bounds(sel_anchor, sel_end)
                     if sel:
