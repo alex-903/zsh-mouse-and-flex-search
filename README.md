@@ -1,6 +1,8 @@
 # zsh flex history search
 
-Terminal UI for searching zsh history with Emacs-style `flex` fuzzy matching and a Base16-driven color palette.
+![zsh flex history screenshot](./screenshot.png)
+
+A modernized terminal UI for searching zsh history with Emacs-style `flex` fuzzy matching, full mouse support for setting point and related interactions, and a Base16-driven color palette.
 
 ## Run
 
@@ -20,6 +22,7 @@ python3 zsh_flex_history.py
 - Uses in-order flexible fuzzy matching (similar to Emacs `flex`).
 - `thbesre` can match phrases like `the best restaurants in the town`.
 - Shows a Corfu-style vertical completion menu with highlighted match chars.
+- Takes over mouse `x` from the native terminal app whenever there is any text in the prompt.
 - Uses Base16 env colors (`BASE16_COLOR_00`..`BASE16_COLOR_0F`) when available, else falls back to a default Base16 scheme.
 
 ## Keys
