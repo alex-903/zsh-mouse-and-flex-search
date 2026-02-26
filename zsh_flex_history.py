@@ -674,12 +674,12 @@ def render_result_line(item: MatchResult, selected: bool, width: int, *, unselec
     match_fg = base16_ansi("base0D")
 
     if selected:
-        normal_style = style(fg=sel_fg, bold=True)
+        normal_style = style(fg=sel_fg, bold=True, underline=True)
     elif unselected_white:
         normal_style = ""
     else:
         normal_style = ""
-    match_style = style(fg=match_fg, bold=True)
+    match_style = style(fg=match_fg, bold=True, underline=selected)
 
     out = [normal_style]
     for i, ch in enumerate(text):
