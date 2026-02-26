@@ -694,11 +694,23 @@ def run(
             # Keep all row math within the visible terminal bounds even if a
             # terminal reports a transient cursor value during startup.
             start_row = max(1, min(start_row, term_lines))
-            # Never scroll the terminal to create room.
+            space_below = max(0, term_lines - start_row)
+            # If there is no room to draw result rows below the prompt area,
+            # reserve lines by scrolling a small amount.
+            if inline_with_prompt:
+                required_below = max(0, desired_rows - 1)
+            else:
+                required_below = desired_rows
+            scroll_rows = max(0, required_below - space_below)
+            if scroll_rows > 0:
+                term_write(move_to(term_lines, 1) + ("\n" * scroll_rows))
+                term_flush()
+                start_row = max(1, start_row - scroll_rows)
+                space_below = max(0, term_lines - start_row)
+
             # For print-only mode, anchor on the prompt row itself so query
             # input starts on the same line as the prompt.
             # Otherwise, use the row below the prompt when possible.
-            space_below = max(0, term_lines - start_row)
             if inline_with_prompt:
                 anchor_row = max(1, start_row)
                 anchor_col = max(1, start_col)
