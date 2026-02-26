@@ -758,371 +758,379 @@ def run(
             last_left_click_col = -1
             left_click_count = 0
 
-            while True:
-                def clear_selection() -> None:
-                    nonlocal sel_anchor, sel_end
-                    sel_anchor = None
-                    sel_end = None
+            def clear_panel_and_restore_cursor() -> None:
+                # Clear panel content so repeated invocations always start clean.
+                for row in range(anchor_row, anchor_row + panel_rows):
+                    term_write(move_to(row, anchor_col) + CLEAR_TO_END)
+                # Restore cursor to the exact prompt position captured at invocation start.
+                term_write(move_to(start_row, start_col))
+                term_flush()
 
-                def move_cursor(new_pos: int, *, select_mode: bool = False) -> None:
-                    nonlocal cursor_pos, sel_anchor, sel_end
-                    new_pos = max(0, min(new_pos, len(query)))
-                    if select_mode:
-                        if sel_anchor is None:
-                            sel_anchor = cursor_pos
+            try:
+                while True:
+                    def clear_selection() -> None:
+                        nonlocal sel_anchor, sel_end
+                        sel_anchor = None
+                        sel_end = None
+
+                    def move_cursor(new_pos: int, *, select_mode: bool = False) -> None:
+                        nonlocal cursor_pos, sel_anchor, sel_end
+                        new_pos = max(0, min(new_pos, len(query)))
+                        if select_mode:
+                            if sel_anchor is None:
+                                sel_anchor = cursor_pos
+                            cursor_pos = new_pos
+                            sel_end = cursor_pos
+                            if sel_anchor == sel_end:
+                                sel_anchor = None
+                                sel_end = None
+                            return
                         cursor_pos = new_pos
-                        sel_end = cursor_pos
-                        if sel_anchor == sel_end:
-                            sel_anchor = None
-                            sel_end = None
-                        return
-                    cursor_pos = new_pos
-                    clear_selection()
-
-                def sync_mouse_mode() -> None:
-                    nonlocal mouse_enabled, mouse_selecting
-                    should_enable = len(query) > 0
-                    if should_enable and not mouse_enabled:
-                        term_write(ENABLE_MOUSE)
-                        term_flush()
-                        mouse_enabled = True
-                    elif not should_enable and mouse_enabled:
-                        term_write(DISABLE_MOUSE)
-                        term_flush()
-                        mouse_enabled = False
-                        mouse_selecting = False
-
-                def select_all_query() -> None:
-                    nonlocal sel_anchor, sel_end, cursor_pos
-                    if not query:
                         clear_selection()
-                        return
-                    sel_anchor = 0
-                    sel_end = len(query)
-                    cursor_pos = len(query)
-
-                def cache_put(key: str, indices: list[int], cached_results: list[MatchResult]) -> None:
-                    if key in match_cache:
-                        return
-                    if len(cache_order) >= cache_limit:
-                        oldest = cache_order.pop(0)
-                        match_cache.pop(oldest, None)
-                    cache_order.append(key)
-                    match_cache[key] = (indices, cached_results)
-
-                if history_updates is not None:
-                    while True:
-                        try:
-                            kind, payload = history_updates.get_nowait()
-                        except queue.Empty:
-                            break
-                        if kind == "loaded":
-                            loaded_history = payload
-                            if isinstance(loaded_history, list):
-                                history = loaded_history
-                                all_indices = list(range(len(history)))
-                                last_query = ""
-                                last_matched_indices = all_indices
-                                initial_results, _ = search("", history, candidate_indices=all_indices, limit=500)
-                                match_cache = {"": (all_indices, initial_results)}
-                                cache_order = [""]
-                            history_loading = False
-                        elif kind == "error":
-                            history_loading = False
-                            history_load_error = True
-
-                width = tty_terminal_size(fd).columns
-                visible = max(1, panel_rows - 1)
-                if query in match_cache:
-                    matched_indices, results = match_cache[query]
-                else:
-                    candidate_indices = all_indices
-                    if query.startswith(last_query):
-                        candidate_indices = last_matched_indices
-                    results, matched_indices = search(
-                        query,
-                        history,
-                        candidate_indices=candidate_indices,
-                        limit=500,
-                    )
-                    cache_put(query, matched_indices, results)
-                last_query = query
-                last_matched_indices = matched_indices
-                status_message = ""
-                if history_loading and not results:
-                    status_message = "loading history..."
-                elif history_load_error and not results:
-                    status_message = "history load failed"
-                if selected >= len(results):
-                    selected = max(0, len(results) - 1)
-                if selected < offset:
-                    offset = selected
-                if selected >= offset + visible:
-                    offset = selected - visible + 1
-
-                query_start, _query_view_len = draw_panel(
-                    anchor_row,
-                    anchor_col,
-                    query,
-                    cursor_pos,
-                    sel_anchor,
-                    sel_end,
-                    results,
-                    selected,
-                    offset,
-                    panel_rows,
-                    width,
-                    status_message=status_message,
-                )
-
-                ev, payload = read_key(fd)
-
-                if ev == "quit":
-                    break
-                if ev == "enter":
-                    chosen = query
-                    break
-                if ev == "tab":
-                    if 0 <= selected < len(results):
-                        query = results[selected].text
+    
+                    def sync_mouse_mode() -> None:
+                        nonlocal mouse_enabled, mouse_selecting
+                        should_enable = len(query) > 0
+                        if should_enable and not mouse_enabled:
+                            term_write(ENABLE_MOUSE)
+                            term_flush()
+                            mouse_enabled = True
+                        elif not should_enable and mouse_enabled:
+                            term_write(DISABLE_MOUSE)
+                            term_flush()
+                            mouse_enabled = False
+                            mouse_selecting = False
+    
+                    def select_all_query() -> None:
+                        nonlocal sel_anchor, sel_end, cursor_pos
+                        if not query:
+                            clear_selection()
+                            return
+                        sel_anchor = 0
+                        sel_end = len(query)
                         cursor_pos = len(query)
+    
+                    def cache_put(key: str, indices: list[int], cached_results: list[MatchResult]) -> None:
+                        if key in match_cache:
+                            return
+                        if len(cache_order) >= cache_limit:
+                            oldest = cache_order.pop(0)
+                            match_cache.pop(oldest, None)
+                        cache_order.append(key)
+                        match_cache[key] = (indices, cached_results)
+    
+                    if history_updates is not None:
+                        while True:
+                            try:
+                                kind, payload = history_updates.get_nowait()
+                            except queue.Empty:
+                                break
+                            if kind == "loaded":
+                                loaded_history = payload
+                                if isinstance(loaded_history, list):
+                                    history = loaded_history
+                                    all_indices = list(range(len(history)))
+                                    last_query = ""
+                                    last_matched_indices = all_indices
+                                    initial_results, _ = search("", history, candidate_indices=all_indices, limit=500)
+                                    match_cache = {"": (all_indices, initial_results)}
+                                    cache_order = [""]
+                                history_loading = False
+                            elif kind == "error":
+                                history_loading = False
+                                history_load_error = True
+    
+                    width = tty_terminal_size(fd).columns
+                    visible = max(1, panel_rows - 1)
+                    if query in match_cache:
+                        matched_indices, results = match_cache[query]
+                    else:
+                        candidate_indices = all_indices
+                        if query.startswith(last_query):
+                            candidate_indices = last_matched_indices
+                        results, matched_indices = search(
+                            query,
+                            history,
+                            candidate_indices=candidate_indices,
+                            limit=500,
+                        )
+                        cache_put(query, matched_indices, results)
+                    last_query = query
+                    last_matched_indices = matched_indices
+                    status_message = ""
+                    if history_loading and not results:
+                        status_message = "loading history..."
+                    elif history_load_error and not results:
+                        status_message = "history load failed"
+                    if selected >= len(results):
+                        selected = max(0, len(results) - 1)
+                    if selected < offset:
+                        offset = selected
+                    if selected >= offset + visible:
+                        offset = selected - visible + 1
+    
+                    query_start, _query_view_len = draw_panel(
+                        anchor_row,
+                        anchor_col,
+                        query,
+                        cursor_pos,
+                        sel_anchor,
+                        sel_end,
+                        results,
+                        selected,
+                        offset,
+                        panel_rows,
+                        width,
+                        status_message=status_message,
+                    )
+    
+                    ev, payload = read_key(fd)
+    
+                    if ev == "quit":
+                        clear_panel_and_restore_cursor()
+                        return None
+                    if ev == "enter":
+                        chosen = query
+                        break
+                    if ev == "tab":
+                        if 0 <= selected < len(results):
+                            query = results[selected].text
+                            cursor_pos = len(query)
+                            clear_selection()
+                            sync_mouse_mode()
+                            selected = 0
+                            offset = 0
+                        continue
+                    if ev == "left":
+                        move_cursor(cursor_pos - 1)
+                        continue
+                    if ev == "right":
+                        move_cursor(cursor_pos + 1)
+                        continue
+                    if ev == "shift_left":
+                        move_cursor(cursor_pos - 1, select_mode=True)
+                        continue
+                    if ev == "shift_right":
+                        move_cursor(cursor_pos + 1, select_mode=True)
+                        continue
+                    if ev == "home":
+                        move_cursor(0)
+                        continue
+                    if ev == "shift_home":
+                        move_cursor(0, select_mode=True)
+                        continue
+                    if ev == "end":
+                        move_cursor(len(query))
+                        continue
+                    if ev == "shift_end":
+                        move_cursor(len(query), select_mode=True)
+                        continue
+                    if ev == "word_left":
+                        move_cursor(move_word_left(query, cursor_pos))
+                        continue
+                    if ev == "word_right":
+                        move_cursor(move_word_right(query, cursor_pos))
+                        continue
+                    if ev == "select_all":
+                        select_all_query()
+                        continue
+                    if ev == "up":
+                        selected = max(0, selected - 1)
+                        continue
+                    if ev == "down":
+                        selected = min(max(0, len(results) - 1), selected + 1)
+                        continue
+                    if ev == "pgup":
+                        selected = max(0, selected - visible)
+                        continue
+                    if ev == "pgdn":
+                        selected = min(max(0, len(results) - 1), selected + visible)
+                        continue
+                    if ev == "backspace":
+                        sel = selection_bounds(sel_anchor, sel_end)
+                        if sel:
+                            query = query[: sel[0]] + query[sel[1] :]
+                            cursor_pos = sel[0]
+                            clear_selection()
+                        elif cursor_pos > 0:
+                            query = query[: cursor_pos - 1] + query[cursor_pos:]
+                            cursor_pos -= 1
+                        sync_mouse_mode()
+                        selected = 0
+                        offset = 0
+                        continue
+                    if ev == "backspace_word":
+                        sel = selection_bounds(sel_anchor, sel_end)
+                        if sel:
+                            query = query[: sel[0]] + query[sel[1] :]
+                            cursor_pos = sel[0]
+                            clear_selection()
+                        else:
+                            new_pos = move_word_left(query, cursor_pos)
+                            if new_pos < cursor_pos:
+                                query = query[:new_pos] + query[cursor_pos:]
+                                cursor_pos = new_pos
+                        sync_mouse_mode()
+                        selected = 0
+                        offset = 0
+                        continue
+                    if ev == "kill_to_start":
+                        sel = selection_bounds(sel_anchor, sel_end)
+                        if sel:
+                            query = query[: sel[0]] + query[sel[1] :]
+                            cursor_pos = sel[0]
+                        else:
+                            query = query[cursor_pos:]
+                            cursor_pos = 0
                         clear_selection()
                         sync_mouse_mode()
                         selected = 0
                         offset = 0
-                    continue
-                if ev == "left":
-                    move_cursor(cursor_pos - 1)
-                    continue
-                if ev == "right":
-                    move_cursor(cursor_pos + 1)
-                    continue
-                if ev == "shift_left":
-                    move_cursor(cursor_pos - 1, select_mode=True)
-                    continue
-                if ev == "shift_right":
-                    move_cursor(cursor_pos + 1, select_mode=True)
-                    continue
-                if ev == "home":
-                    move_cursor(0)
-                    continue
-                if ev == "shift_home":
-                    move_cursor(0, select_mode=True)
-                    continue
-                if ev == "end":
-                    move_cursor(len(query))
-                    continue
-                if ev == "shift_end":
-                    move_cursor(len(query), select_mode=True)
-                    continue
-                if ev == "word_left":
-                    move_cursor(move_word_left(query, cursor_pos))
-                    continue
-                if ev == "word_right":
-                    move_cursor(move_word_right(query, cursor_pos))
-                    continue
-                if ev == "select_all":
-                    select_all_query()
-                    continue
-                if ev == "up":
-                    selected = max(0, selected - 1)
-                    continue
-                if ev == "down":
-                    selected = min(max(0, len(results) - 1), selected + 1)
-                    continue
-                if ev == "pgup":
-                    selected = max(0, selected - visible)
-                    continue
-                if ev == "pgdn":
-                    selected = min(max(0, len(results) - 1), selected + visible)
-                    continue
-                if ev == "backspace":
-                    sel = selection_bounds(sel_anchor, sel_end)
-                    if sel:
-                        query = query[: sel[0]] + query[sel[1] :]
-                        cursor_pos = sel[0]
-                        clear_selection()
-                    elif cursor_pos > 0:
-                        query = query[: cursor_pos - 1] + query[cursor_pos:]
-                        cursor_pos -= 1
-                    sync_mouse_mode()
-                    selected = 0
-                    offset = 0
-                    continue
-                if ev == "backspace_word":
-                    sel = selection_bounds(sel_anchor, sel_end)
-                    if sel:
-                        query = query[: sel[0]] + query[sel[1] :]
-                        cursor_pos = sel[0]
-                        clear_selection()
-                    else:
-                        new_pos = move_word_left(query, cursor_pos)
-                        if new_pos < cursor_pos:
-                            query = query[:new_pos] + query[cursor_pos:]
-                            cursor_pos = new_pos
-                    sync_mouse_mode()
-                    selected = 0
-                    offset = 0
-                    continue
-                if ev == "kill_to_start":
-                    sel = selection_bounds(sel_anchor, sel_end)
-                    if sel:
-                        query = query[: sel[0]] + query[sel[1] :]
-                        cursor_pos = sel[0]
-                    else:
-                        query = query[cursor_pos:]
-                        cursor_pos = 0
-                    clear_selection()
-                    sync_mouse_mode()
-                    selected = 0
-                    offset = 0
-                    continue
-                if ev == "kill_to_end":
-                    sel = selection_bounds(sel_anchor, sel_end)
-                    if sel:
-                        query = query[: sel[0]] + query[sel[1] :]
-                        cursor_pos = sel[0]
-                    else:
-                        query = query[:cursor_pos]
-                    clear_selection()
-                    sync_mouse_mode()
-                    selected = 0
-                    offset = 0
-                    continue
-                if ev == "delete":
-                    sel = selection_bounds(sel_anchor, sel_end)
-                    if sel:
-                        query = query[: sel[0]] + query[sel[1] :]
-                        cursor_pos = sel[0]
-                        clear_selection()
-                    elif cursor_pos < len(query):
-                        query = query[:cursor_pos] + query[cursor_pos + 1 :]
-                    sync_mouse_mode()
-                    selected = 0
-                    offset = 0
-                    continue
-                if ev == "char":
-                    ch = str(payload)
-                    sel = selection_bounds(sel_anchor, sel_end)
-                    if sel:
-                        query = query[: sel[0]] + ch + query[sel[1] :]
-                        cursor_pos = sel[0] + 1
-                        clear_selection()
-                    else:
-                        query = query[:cursor_pos] + ch + query[cursor_pos:]
-                        cursor_pos += 1
-                    sync_mouse_mode()
-                    selected = 0
-                    offset = 0
-                    continue
-                if ev == "copy":
-                    sel = selection_bounds(sel_anchor, sel_end)
-                    if sel:
-                        write_clipboard(query[sel[0] : sel[1]])
-                    elif query:
-                        write_clipboard(query)
-                    continue
-                if ev == "paste":
-                    pasted = read_clipboard()
-                    if not pasted:
                         continue
-                    sel = selection_bounds(sel_anchor, sel_end)
-                    if sel:
-                        query = query[: sel[0]] + pasted + query[sel[1] :]
-                        cursor_pos = sel[0] + len(pasted)
+                    if ev == "kill_to_end":
+                        sel = selection_bounds(sel_anchor, sel_end)
+                        if sel:
+                            query = query[: sel[0]] + query[sel[1] :]
+                            cursor_pos = sel[0]
+                        else:
+                            query = query[:cursor_pos]
                         clear_selection()
-                    else:
-                        query = query[:cursor_pos] + pasted + query[cursor_pos:]
-                        cursor_pos += len(pasted)
-                    sync_mouse_mode()
-                    selected = 0
-                    offset = 0
-                    continue
-                if ev == "mouse":
-                    bstate, mx, my, action = payload  # type: ignore[misc]
-                    if bstate & 64:
-                        # Mouse wheel: mirror up/down arrow behavior.
+                        sync_mouse_mode()
+                        selected = 0
+                        offset = 0
+                        continue
+                    if ev == "delete":
+                        sel = selection_bounds(sel_anchor, sel_end)
+                        if sel:
+                            query = query[: sel[0]] + query[sel[1] :]
+                            cursor_pos = sel[0]
+                            clear_selection()
+                        elif cursor_pos < len(query):
+                            query = query[:cursor_pos] + query[cursor_pos + 1 :]
+                        sync_mouse_mode()
+                        selected = 0
+                        offset = 0
+                        continue
+                    if ev == "char":
+                        ch = str(payload)
+                        sel = selection_bounds(sel_anchor, sel_end)
+                        if sel:
+                            query = query[: sel[0]] + ch + query[sel[1] :]
+                            cursor_pos = sel[0] + 1
+                            clear_selection()
+                        else:
+                            query = query[:cursor_pos] + ch + query[cursor_pos:]
+                            cursor_pos += 1
+                        sync_mouse_mode()
+                        selected = 0
+                        offset = 0
+                        continue
+                    if ev == "copy":
+                        sel = selection_bounds(sel_anchor, sel_end)
+                        if sel:
+                            write_clipboard(query[sel[0] : sel[1]])
+                        elif query:
+                            write_clipboard(query)
+                        continue
+                    if ev == "paste":
+                        pasted = read_clipboard()
+                        if not pasted:
+                            continue
+                        sel = selection_bounds(sel_anchor, sel_end)
+                        if sel:
+                            query = query[: sel[0]] + pasted + query[sel[1] :]
+                            cursor_pos = sel[0] + len(pasted)
+                            clear_selection()
+                        else:
+                            query = query[:cursor_pos] + pasted + query[cursor_pos:]
+                            cursor_pos += len(pasted)
+                        sync_mouse_mode()
+                        selected = 0
+                        offset = 0
+                        continue
+                    if ev == "mouse":
+                        bstate, mx, my, action = payload  # type: ignore[misc]
+                        if bstate & 64:
+                            # Mouse wheel: mirror up/down arrow behavior.
+                            if action != "M":
+                                continue
+                            wheel_button = bstate & 3
+                            if wheel_button == 0:
+                                selected = max(0, selected - 1)
+                            elif wheel_button == 1:
+                                selected = min(max(0, len(results) - 1), selected + 1)
+                            continue
+                        button = bstate & 3
+                        is_motion = bool(bstate & 32)
+                        is_shift = bool(bstate & 4)
+    
+                        # SGR mouse uses 'M' for press/motion, 'm' for release.
+                        if action == "m":
+                            if button in (0, 3):
+                                mouse_selecting = False
+                            continue
                         if action != "M":
                             continue
-                        wheel_button = bstate & 3
-                        if wheel_button == 0:
-                            selected = max(0, selected - 1)
-                        elif wheel_button == 1:
-                            selected = min(max(0, len(results) - 1), selected + 1)
-                        continue
-                    button = bstate & 3
-                    is_motion = bool(bstate & 32)
-                    is_shift = bool(bstate & 4)
-
-                    # SGR mouse uses 'M' for press/motion, 'm' for release.
-                    if action == "m":
-                        if button in (0, 3):
-                            mouse_selecting = False
-                        continue
-                    if action != "M":
-                        continue
-
-                    # Query line interactions.
-                    if my == anchor_row:
-                        click_col = max(anchor_col, mx)
-                        click_pos = query_start + max(0, click_col - anchor_col)
-                        click_pos = max(0, min(click_pos, len(query)))
-
-                        if is_motion:
-                            if mouse_selecting:
-                                move_cursor(click_pos, select_mode=True)
-                            continue
-
-                        if button == 0:
-                            now = time.monotonic()
-                            is_same_click_area = (
-                                (now - last_left_click_time) <= 0.35
-                                and my == last_left_click_row
-                                and abs(mx - last_left_click_col) <= 1
-                            )
-                            if is_same_click_area:
-                                left_click_count += 1
-                            else:
-                                left_click_count = 1
-                            last_left_click_time = now
-                            last_left_click_row = my
-                            last_left_click_col = mx
-
-                            if left_click_count >= 3 and query:
-                                select_all_query()
-                                mouse_selecting = False
-                            elif left_click_count == 2 and query:
-                                # Select a "word" delimited by whitespace.
-                                left = click_pos
-                                while left > 0 and not query[left - 1].isspace():
-                                    left -= 1
-                                right = click_pos
-                                while right < len(query) and not query[right].isspace():
-                                    right += 1
-                                if left != right:
-                                    sel_anchor = left
-                                    sel_end = right
-                                    cursor_pos = right
+    
+                        # Query line interactions.
+                        if my == anchor_row:
+                            click_col = max(anchor_col, mx)
+                            click_pos = query_start + max(0, click_col - anchor_col)
+                            click_pos = max(0, min(click_pos, len(query)))
+    
+                            if is_motion:
+                                if mouse_selecting:
+                                    move_cursor(click_pos, select_mode=True)
+                                continue
+    
+                            if button == 0:
+                                now = time.monotonic()
+                                is_same_click_area = (
+                                    (now - last_left_click_time) <= 0.35
+                                    and my == last_left_click_row
+                                    and abs(mx - last_left_click_col) <= 1
+                                )
+                                if is_same_click_area:
+                                    left_click_count += 1
+                                else:
+                                    left_click_count = 1
+                                last_left_click_time = now
+                                last_left_click_row = my
+                                last_left_click_col = mx
+    
+                                if left_click_count >= 3 and query:
+                                    select_all_query()
+                                    mouse_selecting = False
+                                elif left_click_count == 2 and query:
+                                    # Select a "word" delimited by whitespace.
+                                    left = click_pos
+                                    while left > 0 and not query[left - 1].isspace():
+                                        left -= 1
+                                    right = click_pos
+                                    while right < len(query) and not query[right].isspace():
+                                        right += 1
+                                    if left != right:
+                                        sel_anchor = left
+                                        sel_end = right
+                                        cursor_pos = right
+                                    else:
+                                        move_cursor(click_pos, select_mode=is_shift)
                                 else:
                                     move_cursor(click_pos, select_mode=is_shift)
-                            else:
-                                move_cursor(click_pos, select_mode=is_shift)
-                                mouse_selecting = True
-                            continue
+                                    mouse_selecting = True
+                                continue
+    
+                        # Result line click: select and accept current item.
+                        if my == anchor_row + 1 and results and not is_motion and button == 0:
+                            selected = min(len(results) - 1, max(offset, 0))
+                            chosen = results[selected].text
+                            break
+            except KeyboardInterrupt:
+                clear_panel_and_restore_cursor()
+                return None
 
-                    # Result line click: select and accept current item.
-                    if my == anchor_row + 1 and results and not is_motion and button == 0:
-                        selected = min(len(results) - 1, max(offset, 0))
-                        chosen = results[selected].text
-                        break
-        # Clear panel content so repeated invocations always start clean.
-        for row in range(anchor_row, anchor_row + panel_rows):
-            term_write(move_to(row, anchor_col) + CLEAR_TO_END)
-
-        # Restore cursor to the exact prompt position captured at invocation start.
-        term_write(move_to(start_row, start_col))
-        term_flush()
-        return chosen
+            clear_panel_and_restore_cursor()
+            return chosen
     finally:
         TERM_OUT = sys.stdout
         if tty_in_file is not None:
