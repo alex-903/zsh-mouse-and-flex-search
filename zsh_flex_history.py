@@ -103,6 +103,27 @@ def clear_rows(top: int, bottom: int) -> None:
         term_write(move_to(row, 1) + CLEAR_LINE)
 
 
+def write_clipboard(text: str) -> bool:
+    if shutil.which("pbcopy") is None:
+        return False
+    try:
+        subprocess.run(["pbcopy"], input=text, text=True, check=True)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return True
+
+
+def read_clipboard() -> str:
+    if shutil.which("pbpaste") is None:
+        return ""
+    try:
+        proc = subprocess.run(["pbpaste"], check=True, capture_output=True, text=True)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    text = proc.stdout.replace("\r\n", "\n").replace("\r", "\n")
+    return text.replace("\n", " ")
+
+
 class RawTerminal:
     def __init__(self, fd: int) -> None:
         self.fd = fd
@@ -419,6 +440,10 @@ def read_key(fd: int) -> tuple[str, object]:
                 return "word_left", None
             if codepoint == 102 and alt:
                 return "word_right", None
+            if codepoint in (67, 99) and alt:
+                return "copy", None
+            if codepoint in (86, 118) and alt:
+                return "paste", None
             if 32 <= codepoint < 127:
                 return "char", chr(codepoint)
 
@@ -530,6 +555,10 @@ def read_key(fd: int) -> tuple[str, object]:
                 return "word_left", None
             if full in (b"\x1bf", b"\x1b[1;3C"):
                 return "word_right", None
+            if full in (b"\x1bc", b"\x1bC"):
+                return "copy", None
+            if full in (b"\x1bv", b"\x1bV"):
+                return "paste", None
             continue
         if 32 <= ch < 127:
             return "char", chr(ch)
@@ -744,10 +773,10 @@ def run(history: list[str], *, inline_with_prompt: bool = False) -> Optional[str
                     move_cursor(move_word_right(query, cursor_pos))
                     continue
                 if ev == "up":
-                    selected = min(max(0, len(results) - 1), selected + 1)
+                    selected = max(0, selected - 1)
                     continue
                 if ev == "down":
-                    selected = max(0, selected - 1)
+                    selected = min(max(0, len(results) - 1), selected + 1)
                     continue
                 if ev == "pgup":
                     selected = max(0, selected - visible)
@@ -830,6 +859,29 @@ def run(history: list[str], *, inline_with_prompt: bool = False) -> Optional[str
                     else:
                         query = query[:cursor_pos] + ch + query[cursor_pos:]
                         cursor_pos += 1
+                    sync_mouse_mode()
+                    selected = 0
+                    offset = 0
+                    continue
+                if ev == "copy":
+                    sel = selection_bounds(sel_anchor, sel_end)
+                    if sel:
+                        write_clipboard(query[sel[0] : sel[1]])
+                    elif query:
+                        write_clipboard(query)
+                    continue
+                if ev == "paste":
+                    pasted = read_clipboard()
+                    if not pasted:
+                        continue
+                    sel = selection_bounds(sel_anchor, sel_end)
+                    if sel:
+                        query = query[: sel[0]] + pasted + query[sel[1] :]
+                        cursor_pos = sel[0] + len(pasted)
+                        clear_selection()
+                    else:
+                        query = query[:cursor_pos] + pasted + query[cursor_pos:]
+                        cursor_pos += len(pasted)
                     sync_mouse_mode()
                     selected = 0
                     offset = 0
