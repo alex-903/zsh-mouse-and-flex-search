@@ -273,7 +273,7 @@ def selection_bounds(sel_anchor: Optional[int], sel_end: Optional[int]) -> Optio
     return (min(sel_anchor, sel_end), max(sel_anchor, sel_end))
 
 
-def render_result_line(item: MatchResult, selected: bool, width: int) -> str:
+def render_result_line(item: MatchResult, selected: bool, width: int, *, unselected_white: bool = False) -> str:
     if width <= 0:
         return ""
 
@@ -284,7 +284,12 @@ def render_result_line(item: MatchResult, selected: bool, width: int) -> str:
     sel_fg = base16_ansi("base0D")
     match_fg = base16_ansi("base0B")
 
-    normal_style = style(fg=sel_fg, bold=True) if selected else ""
+    if selected:
+        normal_style = style(fg=sel_fg, bold=True)
+    elif unselected_white:
+        normal_style = style(fg=base16_ansi("base05"))
+    else:
+        normal_style = ""
     match_style = style(fg=match_fg, bold=True)
 
     out = [normal_style]
@@ -310,14 +315,11 @@ def draw_panel(
 ) -> tuple[int, int]:
     anchor_col = max(1, anchor_col)
     render_width = max(1, width - anchor_col + 1)
-    visible = 1
+    visible = max(1, panel_rows - 1)
     muted = style(fg=base16_ansi("base03"))
 
     lines: list[str] = []
     cursor_pos = max(0, min(cursor_pos, len(query)))
-    total = len(results)
-    current = (selected + 1) if total else 0
-    counter_text = f"{current}/{total}"
     query_width = render_width
     query_start, query_view = query_window(query, cursor_pos, query_width)
     sel = selection_bounds(sel_anchor, sel_end)
@@ -330,13 +332,23 @@ def draw_panel(
             query_parts.append(ch)
     lines.append("".join(query_parts))
 
-    idx = offset
-    if idx >= len(results):
-        lines.append("")
-    else:
-        result_width = max(0, render_width - len(counter_text) - 1)
-        base_line = render_result_line(results[idx], idx == selected, result_width)
-        lines.append(f"{base_line}    {muted}{counter_text}{RESET}")
+    for i in range(visible):
+        idx = offset + i
+        if idx >= len(results):
+            lines.append("")
+            continue
+        remaining = max(0, len(results) - (offset + visible))
+        is_last_visible_row = i == (visible - 1)
+        more_text = f"{remaining} more" if (is_last_visible_row and remaining > 0) else ""
+        suffix = f"    {muted}{more_text}{RESET}" if more_text else ""
+        result_width = max(0, render_width - len(more_text) - (4 if more_text else 0))
+        base_line = render_result_line(
+            results[idx],
+            idx == selected,
+            result_width,
+            unselected_white=True,
+        )
+        lines.append(f"{base_line}{suffix}")
 
     for i, line in enumerate(lines[:panel_rows]):
         term_write(move_to(anchor_row + i, anchor_col) + CLEAR_TO_END + line)
@@ -577,7 +589,7 @@ def run(history: list[str], *, inline_with_prompt: bool = False) -> Optional[str
     if fd is None:
         print("zsh_flex_history: no usable TTY available for interactive mode", file=sys.stderr)
         return None
-    panel_rows = 2
+    panel_rows = 4
 
     try:
         with RawTerminal(fd) as rt:
@@ -648,7 +660,7 @@ def run(history: list[str], *, inline_with_prompt: bool = False) -> Optional[str
                     clear_selection()
 
                 width = shutil.get_terminal_size((120, 24)).columns
-                visible = 1
+                visible = max(1, panel_rows - 1)
 
                 results = search(query, history, limit=500)
                 if selected >= len(results):
