@@ -1,4 +1,4 @@
-# zsh flex history search
+# zsh mouse and flex history search
 
 ![zsh flex history screenshot](./screenshot.png)
 
