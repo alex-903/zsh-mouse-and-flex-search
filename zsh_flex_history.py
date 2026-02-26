@@ -105,7 +105,6 @@ class RawTerminal:
     def __init__(self, fd: int) -> None:
         self.fd = fd
         self._old: Optional[list] = None
-        self._mouse_enabled = False
 
     def __enter__(self) -> "RawTerminal":
         self._old = termios.tcgetattr(self.fd)
@@ -119,23 +118,7 @@ class RawTerminal:
         term_flush()
         return self
 
-    def enable_mouse(self) -> None:
-        if self._mouse_enabled:
-            return
-        # Mouse click + drag + wheel + SGR extended mouse coordinates.
-        term_write("\x1b[?1000h\x1b[?1002h\x1b[?1006h")
-        term_flush()
-        self._mouse_enabled = True
-
-    def disable_mouse(self) -> None:
-        if not self._mouse_enabled:
-            return
-        term_write("\x1b[?1000l\x1b[?1002l\x1b[?1006l")
-        term_flush()
-        self._mouse_enabled = False
-
     def __exit__(self, exc_type, exc, tb) -> None:
-        self.disable_mouse()
         term_write(SHOW_CURSOR + RESET)
         term_flush()
         if self._old is not None:
@@ -285,33 +268,6 @@ def selection_bounds(sel_anchor: Optional[int], sel_end: Optional[int]) -> Optio
     return (min(sel_anchor, sel_end), max(sel_anchor, sel_end))
 
 
-def word_bounds(query: str, idx: int) -> tuple[int, int]:
-    if not query:
-        return (0, 0)
-    idx = max(0, min(idx, len(query) - 1))
-    if query[idx].isspace():
-        right = idx
-        while right < len(query) and query[right].isspace():
-            right += 1
-        if right < len(query):
-            idx = right
-        else:
-            left = idx
-            while left >= 0 and query[left].isspace():
-                left -= 1
-            if left < 0:
-                return (idx, idx)
-            idx = left
-
-    start = idx
-    end = idx + 1
-    while start > 0 and not query[start - 1].isspace():
-        start -= 1
-    while end < len(query) and not query[end].isspace():
-        end += 1
-    return (start, end)
-
-
 def render_result_line(item: MatchResult, selected: bool, width: int) -> str:
     if width <= 0:
         return ""
@@ -349,7 +305,7 @@ def draw_panel(
 ) -> tuple[int, int]:
     anchor_col = max(1, anchor_col)
     render_width = max(1, width - anchor_col + 1)
-    visible = max(1, panel_rows - 1)
+    visible = 1
     muted = style(fg=base16_ansi("base03"))
 
     lines: list[str] = []
@@ -369,17 +325,13 @@ def draw_panel(
             query_parts.append(ch)
     lines.append("".join(query_parts))
 
-    for i in range(visible):
-        idx = offset + i
-        if idx >= len(results):
-            lines.append("")
-            continue
-        if i == 0:
-            result_width = max(0, render_width - len(counter_text) - 1)
-            base_line = render_result_line(results[idx], idx == selected, result_width)
-            lines.append(f"{base_line}    {muted}{counter_text}{RESET}")
-            continue
-        lines.append(render_result_line(results[idx], idx == selected, render_width))
+    idx = offset
+    if idx >= len(results):
+        lines.append("")
+    else:
+        result_width = max(0, render_width - len(counter_text) - 1)
+        base_line = render_result_line(results[idx], idx == selected, result_width)
+        lines.append(f"{base_line}    {muted}{counter_text}{RESET}")
 
     for i, line in enumerate(lines[:panel_rows]):
         term_write(move_to(anchor_row + i, anchor_col) + CLEAR_TO_END + line)
@@ -490,7 +442,7 @@ def run(history: list[str], *, inline_with_prompt: bool = False) -> Optional[str
     if fd is None:
         print("zsh_flex_history: no usable TTY available for interactive mode", file=sys.stderr)
         return None
-    panel_rows = max(4, int(os.environ.get("ZFH_PANEL_ROWS", "14")))
+    panel_rows = 2
 
     try:
         with RawTerminal(fd) as rt:
@@ -520,7 +472,6 @@ def run(history: list[str], *, inline_with_prompt: bool = False) -> Optional[str
                 anchor_row = max(1, start_row)
                 anchor_col = 1
                 panel_rows = max(1, min(desired_rows, term_lines - anchor_row + 1))
-            rt.enable_mouse()
             for row in range(anchor_row, anchor_row + panel_rows):
                 term_write(move_to(row, anchor_col) + CLEAR_TO_END)
             term_write(move_to(anchor_row, anchor_col))
@@ -530,17 +481,13 @@ def run(history: list[str], *, inline_with_prompt: bool = False) -> Optional[str
             cursor_pos = 0
             sel_anchor: Optional[int] = None
             sel_end: Optional[int] = None
-            mouse_selecting = False
-            suppress_query_release_clear = False
-            last_query_click_at = 0.0
-            last_query_click_pos = -1
             selected = 0
             offset = 0
             chosen: Optional[str] = None
 
             while True:
                 width = shutil.get_terminal_size((120, 24)).columns
-                visible = max(1, panel_rows - 1)
+                visible = 1
 
                 results = search(query, history, limit=500)
                 if selected >= len(results):
@@ -550,7 +497,7 @@ def run(history: list[str], *, inline_with_prompt: bool = False) -> Optional[str
                 if selected >= offset + visible:
                     offset = selected - visible + 1
 
-                query_start, query_view_len = draw_panel(
+                draw_panel(
                     anchor_row,
                     anchor_col,
                     query,
@@ -602,7 +549,10 @@ def run(history: list[str], *, inline_with_prompt: bool = False) -> Optional[str
                     sel_end = None
                     continue
                 if ev == "up":
-                    selected = max(0, selected - 1)
+                    if results:
+                        selected = (selected - 1) % len(results)
+                    else:
+                        selected = 0
                     continue
                 if ev == "down":
                     selected = min(max(0, len(results) - 1), selected + 1)
@@ -652,81 +602,6 @@ def run(history: list[str], *, inline_with_prompt: bool = False) -> Optional[str
                     selected = 0
                     offset = 0
                     continue
-                if ev == "mouse":
-                    bstate, x, y, action = payload
-
-                    # SGR wheel events: 64 up, 65 down.
-                    if bstate == 64:
-                        selected = max(0, selected - 1)
-                        continue
-                    if bstate == 65:
-                        selected = min(max(0, len(results) - 1), selected + 1)
-                        continue
-
-                    row_in_panel = y - anchor_row
-
-                    if row_in_panel == 0:
-                        click_index = max(0, min(query_view_len, x - anchor_col))
-                        target = min(len(query), query_start + click_index)
-                        if action == "M" and bstate == 0:
-                            now = time.monotonic()
-                            is_double = (now - last_query_click_at <= 0.35) and (abs(target - last_query_click_pos) <= 1)
-                            last_query_click_at = now
-                            last_query_click_pos = target
-                            if is_double:
-                                wstart, wend = word_bounds(query, target)
-                                sel_anchor = wstart
-                                sel_end = wend
-                                cursor_pos = wend
-                                mouse_selecting = False
-                                suppress_query_release_clear = True
-                                continue
-                            mouse_selecting = True
-                            sel_anchor = target
-                            sel_end = target
-                            cursor_pos = target
-                            continue
-                        if action == "M" and (bstate & 32):
-                            if mouse_selecting:
-                                sel_end = target
-                                cursor_pos = target
-                            continue
-                        if action == "m":
-                            if suppress_query_release_clear:
-                                suppress_query_release_clear = False
-                                continue
-                            if mouse_selecting:
-                                mouse_selecting = False
-                                sel_end = target
-                                cursor_pos = target
-                                if selection_bounds(sel_anchor, sel_end) is None:
-                                    sel_anchor = None
-                                    sel_end = None
-                            else:
-                                cursor_pos = target
-                                sel_anchor = None
-                                sel_end = None
-                            continue
-
-                    if action == "m" and mouse_selecting:
-                        mouse_selecting = False
-                        if selection_bounds(sel_anchor, sel_end) is None:
-                            sel_anchor = None
-                            sel_end = None
-
-                    # Left click on result rows -> complete like Tab.
-                    if action == "M" and bstate == 0:
-                        result_row = row_in_panel - 1
-                        idx = offset + result_row
-                        if 0 <= result_row < visible and 0 <= idx < len(results) and x >= anchor_col:
-                            query = results[idx].text
-                            cursor_pos = len(query)
-                            sel_anchor = None
-                            sel_end = None
-                            selected = 0
-                            offset = 0
-                        continue
-
         # Clear panel content so repeated invocations always start clean.
         for row in range(anchor_row, anchor_row + panel_rows):
             term_write(move_to(row, anchor_col) + CLEAR_TO_END)
