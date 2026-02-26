@@ -2,7 +2,7 @@ fh-line-init() {
   [[ -n ${widgets[fh-orig-line-init]} ]] && zle fh-orig-line-init
 
   local cmd
-  cmd="$("/Users/alex/Desktop/git/untitled folder/zsh_flex_history.py" --print-only 2>/dev/null)" || return
+  cmd="$("/Users/user/Desktop/git/zsh-mouse-and-flex-search/zsh_flex_history.py" --print-only 2>/dev/null)" || return
   [[ -z "$cmd" ]] && return
 
   BUFFER="$cmd"
