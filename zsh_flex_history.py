@@ -358,7 +358,7 @@ def render_result_line(item: MatchResult, selected: bool, width: int, *, unselec
     if selected:
         normal_style = style(fg=sel_fg, bold=True)
     elif unselected_white:
-        normal_style = style(fg=base16_ansi("base05"))
+        normal_style = ""
     else:
         normal_style = ""
     match_style = style(fg=match_fg, bold=True)
@@ -494,6 +494,8 @@ def read_key(fd: int) -> tuple[str, object]:
                 return "word_left", None
             if codepoint == 102 and alt:
                 return "word_right", None
+            if codepoint in (65, 97) and alt:
+                return "select_all", None
             if codepoint in (67, 99) and alt:
                 return "copy", None
             if codepoint in (86, 118) and alt:
@@ -609,6 +611,8 @@ def read_key(fd: int) -> tuple[str, object]:
                 return "word_left", None
             if full in (b"\x1bf", b"\x1b[1;3C"):
                 return "word_right", None
+            if full in (b"\x1ba", b"\x1bA"):
+                return "select_all", None
             if full in (b"\x1bc", b"\x1bC"):
                 return "copy", None
             if full in (b"\x1bv", b"\x1bV"):
@@ -752,6 +756,7 @@ def run(
             last_left_click_time = 0.0
             last_left_click_row = -1
             last_left_click_col = -1
+            left_click_count = 0
 
             while True:
                 def clear_selection() -> None:
@@ -786,6 +791,15 @@ def run(
                         term_flush()
                         mouse_enabled = False
                         mouse_selecting = False
+
+                def select_all_query() -> None:
+                    nonlocal sel_anchor, sel_end, cursor_pos
+                    if not query:
+                        clear_selection()
+                        return
+                    sel_anchor = 0
+                    sel_end = len(query)
+                    cursor_pos = len(query)
 
                 def cache_put(key: str, indices: list[int], cached_results: list[MatchResult]) -> None:
                     if key in match_cache:
@@ -906,6 +920,9 @@ def run(
                     continue
                 if ev == "word_right":
                     move_cursor(move_word_right(query, cursor_pos))
+                    continue
+                if ev == "select_all":
+                    select_all_query()
                     continue
                 if ev == "up":
                     selected = max(0, selected - 1)
@@ -1058,16 +1075,23 @@ def run(
 
                         if button == 0:
                             now = time.monotonic()
-                            is_double_click = (
+                            is_same_click_area = (
                                 (now - last_left_click_time) <= 0.35
                                 and my == last_left_click_row
                                 and abs(mx - last_left_click_col) <= 1
                             )
+                            if is_same_click_area:
+                                left_click_count += 1
+                            else:
+                                left_click_count = 1
                             last_left_click_time = now
                             last_left_click_row = my
                             last_left_click_col = mx
 
-                            if is_double_click and query:
+                            if left_click_count >= 3 and query:
+                                select_all_query()
+                                mouse_selecting = False
+                            elif left_click_count == 2 and query:
                                 # Select a "word" delimited by whitespace.
                                 left = click_pos
                                 while left > 0 and not query[left - 1].isspace():
