@@ -21,15 +21,14 @@ python3 zsh_flex_history.py
 - Loads history from `$HISTFILE` (or `~/.zsh_history`) on launch.
 - Uses in-order flexible fuzzy matching (similar to Emacs `flex`).
 - `thbesre` can match phrases like `the best restaurants in the town`.
-- Shows a Corfu-style vertical completion menu with highlighted match chars.
-- Takes over mouse `x` from the native terminal app whenever there is any text in the prompt.
-- Uses Base16 env colors (`BASE16_COLOR_00`..`BASE16_COLOR_0F`) when available, else falls back to a default Base16 scheme.
+- Shows a completing-read style vertical completion menu with highlighted match chars.
+- Takes over mouse `x` from the native terminal app only when there is any text in the prompt.
 
 ## Keys
 
-- `Up` / `Down`: move selection
+- `Up` / `Down` / Scroll: move selection
+- `Tab`: inserts selected command
 - `PageUp` / `PageDown`: move faster
 - `Backspace`: delete query char
 - `Enter`: print selected command to stdout
 - `Esc` or `Ctrl-C`: quit
-- `q`: quit when query is empty
