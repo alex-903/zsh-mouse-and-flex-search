@@ -285,7 +285,7 @@ def render_result_line(item: MatchResult, selected: bool, width: int) -> str:
     match_fg = base16_ansi("base0B")
 
     normal_style = style(fg=sel_fg, bold=True) if selected else ""
-    match_style = style(fg=match_fg, bold=True, underline=selected)
+    match_style = style(fg=match_fg, bold=True)
 
     out = [normal_style]
     for i, ch in enumerate(text):
@@ -719,13 +719,10 @@ def run(history: list[str], *, inline_with_prompt: bool = False) -> Optional[str
                     move_cursor(move_word_right(query, cursor_pos))
                     continue
                 if ev == "up":
-                    if results:
-                        selected = (selected - 1) % len(results)
-                    else:
-                        selected = 0
+                    selected = min(max(0, len(results) - 1), selected + 1)
                     continue
                 if ev == "down":
-                    selected = min(max(0, len(results) - 1), selected + 1)
+                    selected = max(0, selected - 1)
                     continue
                 if ev == "pgup":
                     selected = max(0, selected - visible)
