@@ -999,8 +999,15 @@ def run(
                     continue
                 if ev == "mouse":
                     bstate, mx, my, action = payload  # type: ignore[misc]
-                    # Ignore wheel events so mouse wheel does not navigate results.
                     if bstate & 64:
+                        # Mouse wheel: mirror up/down arrow behavior.
+                        if action != "M":
+                            continue
+                        wheel_button = bstate & 3
+                        if wheel_button == 0:
+                            selected = max(0, selected - 1)
+                        elif wheel_button == 1:
+                            selected = min(max(0, len(results) - 1), selected + 1)
                         continue
                     button = bstate & 3
                     is_motion = bool(bstate & 32)
