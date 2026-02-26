@@ -20,7 +20,6 @@ python3 zsh_flex_history.py
 
 - Loads history from `$HISTFILE` (or `~/.zsh_history`) on launch.
 - Uses in-order flexible fuzzy matching (similar to Emacs `flex`).
-- `thbesre` can match phrases like `the best restaurants in the town`.
 - Shows a completing-read style vertical completion menu with highlighted match chars.
 - Takes over mouse `x` from the native terminal app only when there is any text in the prompt.
 
