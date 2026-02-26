@@ -281,8 +281,8 @@ def render_result_line(item: MatchResult, selected: bool, width: int, *, unselec
     text = truncate_text(item.text, body_width)
     pos_set = set(item.positions)
 
-    sel_fg = base16_ansi("base0D")
-    match_fg = base16_ansi("base0B")
+    sel_fg = base16_ansi("base0E")
+    match_fg = base16_ansi("base0D")
 
     if selected:
         normal_style = style(fg=sel_fg, bold=True)
@@ -659,6 +659,19 @@ def run(history: list[str], *, inline_with_prompt: bool = False) -> Optional[str
                     cursor_pos = new_pos
                     clear_selection()
 
+                def sync_mouse_mode() -> None:
+                    nonlocal mouse_enabled, mouse_selecting
+                    should_enable = len(query) > 0
+                    if should_enable and not mouse_enabled:
+                        term_write(ENABLE_MOUSE)
+                        term_flush()
+                        mouse_enabled = True
+                    elif not should_enable and mouse_enabled:
+                        term_write(DISABLE_MOUSE)
+                        term_flush()
+                        mouse_enabled = False
+                        mouse_selecting = False
+
                 width = shutil.get_terminal_size((120, 24)).columns
                 visible = max(1, panel_rows - 1)
 
@@ -697,6 +710,7 @@ def run(history: list[str], *, inline_with_prompt: bool = False) -> Optional[str
                         query = results[selected].text
                         cursor_pos = len(query)
                         clear_selection()
+                        sync_mouse_mode()
                         selected = 0
                         offset = 0
                     continue
@@ -751,6 +765,7 @@ def run(history: list[str], *, inline_with_prompt: bool = False) -> Optional[str
                     elif cursor_pos > 0:
                         query = query[: cursor_pos - 1] + query[cursor_pos:]
                         cursor_pos -= 1
+                    sync_mouse_mode()
                     selected = 0
                     offset = 0
                     continue
@@ -765,6 +780,7 @@ def run(history: list[str], *, inline_with_prompt: bool = False) -> Optional[str
                         if new_pos < cursor_pos:
                             query = query[:new_pos] + query[cursor_pos:]
                             cursor_pos = new_pos
+                    sync_mouse_mode()
                     selected = 0
                     offset = 0
                     continue
@@ -777,6 +793,7 @@ def run(history: list[str], *, inline_with_prompt: bool = False) -> Optional[str
                         query = query[cursor_pos:]
                         cursor_pos = 0
                     clear_selection()
+                    sync_mouse_mode()
                     selected = 0
                     offset = 0
                     continue
@@ -788,6 +805,7 @@ def run(history: list[str], *, inline_with_prompt: bool = False) -> Optional[str
                     else:
                         query = query[:cursor_pos]
                     clear_selection()
+                    sync_mouse_mode()
                     selected = 0
                     offset = 0
                     continue
@@ -799,14 +817,11 @@ def run(history: list[str], *, inline_with_prompt: bool = False) -> Optional[str
                         clear_selection()
                     elif cursor_pos < len(query):
                         query = query[:cursor_pos] + query[cursor_pos + 1 :]
+                    sync_mouse_mode()
                     selected = 0
                     offset = 0
                     continue
                 if ev == "char":
-                    if not mouse_enabled:
-                        term_write(ENABLE_MOUSE)
-                        term_flush()
-                        mouse_enabled = True
                     ch = str(payload)
                     sel = selection_bounds(sel_anchor, sel_end)
                     if sel:
@@ -816,6 +831,7 @@ def run(history: list[str], *, inline_with_prompt: bool = False) -> Optional[str
                     else:
                         query = query[:cursor_pos] + ch + query[cursor_pos:]
                         cursor_pos += 1
+                    sync_mouse_mode()
                     selected = 0
                     offset = 0
                     continue
