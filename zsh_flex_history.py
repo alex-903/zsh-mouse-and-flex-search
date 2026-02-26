@@ -681,9 +681,13 @@ def render_result_line(item: MatchResult, selected: bool, width: int, *, unselec
         normal_style = ""
     match_style = style(fg=match_fg, bold=True, underline=selected)
 
-    out = [normal_style]
+    out: list[str] = []
+    active_style = ""
     for i, ch in enumerate(text):
-        out.append(match_style if i in pos_set else normal_style)
+        target_style = match_style if i in pos_set else normal_style
+        if target_style != active_style:
+            out.append(target_style if target_style else RESET)
+            active_style = target_style
         out.append(ch)
     out.append(RESET)
     return "".join(out)
