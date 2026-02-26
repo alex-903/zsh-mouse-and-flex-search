@@ -105,6 +105,14 @@ def clear_rows(top: int, bottom: int) -> None:
         term_write(move_to(row, 1) + CLEAR_LINE)
 
 
+def tty_terminal_size(fd: int, fallback: tuple[int, int] = (120, 24)) -> os.terminal_size:
+    try:
+        return os.get_terminal_size(fd)
+    except OSError:
+        size = shutil.get_terminal_size(fallback)
+        return os.terminal_size((max(1, size.columns), max(1, size.lines)))
+
+
 def write_clipboard(text: str) -> bool:
     if shutil.which("pbcopy") is None:
         return False
@@ -673,7 +681,8 @@ def run(
 
     try:
         with RawTerminal(fd) as rt:
-            term_lines = shutil.get_terminal_size((120, 24)).lines
+            term_size = tty_terminal_size(fd)
+            term_lines = term_size.lines
             pos = query_cursor_position(fd)
             desired_rows = max(1, min(panel_rows, term_lines))
             if pos is None:
@@ -682,6 +691,9 @@ def run(
             else:
                 start_row = pos[0]
                 start_col = pos[1]
+            # Keep all row math within the visible terminal bounds even if a
+            # terminal reports a transient cursor value during startup.
+            start_row = max(1, min(start_row, term_lines))
             # Never scroll the terminal to create room.
             # For print-only mode, anchor on the prompt row itself so query
             # input starts on the same line as the prompt.
@@ -793,7 +805,7 @@ def run(
                             history_loading = False
                             history_load_error = True
 
-                width = shutil.get_terminal_size((120, 24)).columns
+                width = tty_terminal_size(fd).columns
                 visible = max(1, panel_rows - 1)
                 if query in match_cache:
                     matched_indices, results = match_cache[query]
