@@ -135,6 +135,12 @@ def read_clipboard() -> str:
     return text.replace("\n", " ")
 
 
+def normalize_shell_command(text: str) -> str:
+    cleaned = text.replace("\r\n", "\n").replace("\r", "\n").replace("\x00", "")
+    cleaned = cleaned.replace("\\\n", "")
+    return cleaned.strip("\n")
+
+
 class RawTerminal:
     def __init__(self, fd: int) -> None:
         self.fd = fd
@@ -197,20 +203,30 @@ def load_history(path: Path) -> list[str]:
     if not path.exists():
         return entries
 
-    with path.open("r", encoding="utf-8", errors="replace") as f:
-        for line in f:
-            line = line.rstrip("\n")
-            if not line:
-                continue
-            # zsh extended history format: ': 1700012345:0;command'
-            if line.startswith(": "):
-                semicolon = line.find(";")
-                if semicolon != -1:
-                    cmd = line[semicolon + 1 :].strip()
-                    if cmd:
-                        entries.append(cmd)
-                        continue
-            entries.append(line)
+    raw = path.read_text(encoding="utf-8", errors="replace")
+    normalized = raw.replace("\r\n", "\n").replace("\r", "\n")
+
+    # zsh extended history format:
+    #   : 1700012345:0;command
+    # Commands can span multiple physical lines in the history file.
+    header_re = re.compile(r"^: \d+:\d+;", re.MULTILINE)
+    headers = list(header_re.finditer(normalized))
+
+    if headers:
+        for i, match in enumerate(headers):
+            cmd_start = match.end()
+            cmd_end = headers[i + 1].start() if i + 1 < len(headers) else len(normalized)
+            cmd = normalized[cmd_start:cmd_end]
+            # Drop the entry terminator newline and join zsh continuation lines.
+            cmd = cmd.rstrip("\n").replace("\\\n", "")
+            cmd = cmd.strip()
+            if cmd:
+                entries.append(cmd)
+    else:
+        for line in normalized.split("\n"):
+            line = line.strip()
+            if line:
+                entries.append(line)
 
     dedup: list[str] = []
     seen = set()
@@ -1464,11 +1480,10 @@ def run(
                                     mouse_selecting = True
                                 continue
     
-                        # Result line click: select and accept current item.
-                        if my == anchor_row + 1 and results and not is_motion and button == 0:
-                            selected = min(len(results) - 1, max(offset, 0))
-                            chosen = results[selected].text
-                            break
+                        # Ignore result-line clicks; selection/accept remains
+                        # keyboard-driven (arrows + Enter/Tab).
+                        if my >= anchor_row + 1 and my < anchor_row + panel_rows and not is_motion and button == 0:
+                            continue
             except KeyboardInterrupt:
                 clear_panel_and_restore_cursor()
                 return None
@@ -1496,6 +1511,9 @@ def main() -> int:
     history_updates = spawn_history_loader(history_path)
     selected = run([], inline_with_prompt=args.print_only, history_updates=history_updates)
     if selected:
+        selected = normalize_shell_command(selected)
+        if not selected:
+            return 1
         if args.print_only:
             print(selected)
             return 0
