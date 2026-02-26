@@ -29,5 +29,5 @@ python3 zsh_flex_history.py
 - `Tab`: inserts selected command
 - `PageUp` / `PageDown`: move faster
 - `Backspace`: delete query char
-- `Enter`: print selected command to stdout
+- `Enter`: print and optionall runs the selected command
 - `Esc` or `Ctrl-C`: quit
