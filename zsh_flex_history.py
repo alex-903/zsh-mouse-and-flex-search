@@ -7,6 +7,7 @@ import os
 import queue
 import re
 import select
+import shlex
 import shutil
 import subprocess
 import sys
@@ -282,10 +283,315 @@ def flex_match(query: str, candidate: str) -> Optional[MatchResult]:
     return MatchResult(candidate, score, positions)
 
 
+def token_bounds(query: str, cursor_pos: int) -> tuple[int, int]:
+    cursor = max(0, min(cursor_pos, len(query)))
+    tokens: list[tuple[int, int]] = []
+    i = 0
+    while i < len(query):
+        while i < len(query) and query[i].isspace():
+            i += 1
+        if i >= len(query):
+            break
+        start = i
+        quote: Optional[str] = None
+        escaped = False
+        while i < len(query):
+            ch = query[i]
+            if escaped:
+                escaped = False
+                i += 1
+                continue
+            if ch == "\\":
+                escaped = True
+                i += 1
+                continue
+            if quote is not None:
+                if ch == quote:
+                    quote = None
+                i += 1
+                continue
+            if ch in ("'", '"'):
+                quote = ch
+                i += 1
+                continue
+            if ch.isspace():
+                break
+            i += 1
+        end = i
+        tokens.append((start, end))
+    for start, end in tokens:
+        if start <= cursor <= end:
+            return start, end
+    return cursor, cursor
+
+
+def strip_enclosing_quotes(token: str) -> str:
+    if len(token) >= 2 and token[0] == token[-1] and token[0] in ("'", '"'):
+        return token[1:-1]
+    if token.startswith(("'", '"')):
+        return token[1:]
+    if token.endswith(("'", '"')):
+        return token[:-1]
+    return token
+
+
+def enclosing_quote(token: str) -> tuple[Optional[str], bool]:
+    if not token:
+        return None, False
+    if token[0] not in ("'", '"'):
+        return None, False
+    quote = token[0]
+    return quote, len(token) > 1 and token[-1] == quote
+
+
+def shell_unescape_fragment(text: str) -> str:
+    out: list[str] = []
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if ch == "\\" and i + 1 < len(text):
+            i += 1
+            out.append(text[i])
+        else:
+            out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def shell_escape_fragment(text: str) -> str:
+    escaped: list[str] = []
+    safe = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._/~")
+    for ch in text:
+        if ch in safe:
+            escaped.append(ch)
+        else:
+            escaped.append("\\" + ch)
+    return "".join(escaped)
+
+
+def command_token_for_query(query: str) -> Optional[str]:
+    stripped = query.strip()
+    if not stripped:
+        return None
+    try:
+        tokens = shlex.split(stripped)
+    except ValueError:
+        tokens = stripped.split()
+    if not tokens:
+        return None
+    return tokens[0]
+
+
+def path_completion_replacements(
+    query: str,
+    cursor_pos: int,
+    *,
+    cwd: Optional[Path] = None,
+    dirs_only: bool = False,
+    limit: int = 64,
+) -> list[str]:
+    start, end = token_bounds(query, cursor_pos)
+    raw_token = query[start:end]
+    stripped = strip_enclosing_quotes(raw_token)
+    if not stripped:
+        return []
+
+    unescaped = shell_unescape_fragment(stripped)
+    working_dir = cwd or Path.cwd()
+
+    if unescaped.endswith("/"):
+        parent_part = unescaped[:-1]
+        name_prefix = ""
+    else:
+        parent_part, sep, name_prefix = unescaped.rpartition("/")
+        if not sep:
+            parent_part = ""
+
+    if unescaped.startswith("/"):
+        base_dir = Path(parent_part) if parent_part else Path("/")
+        display_prefix = parent_part if parent_part else "/"
+    elif unescaped.startswith("~"):
+        full = Path(unescaped).expanduser()
+        if unescaped.endswith("/"):
+            base_dir = full
+            name_prefix = ""
+        else:
+            base_dir = full.parent
+            name_prefix = full.name
+        display_prefix = str(Path(unescaped).parent)
+        if display_prefix == ".":
+            display_prefix = "~"
+    else:
+        rel_parent = Path(parent_part) if parent_part else Path(".")
+        base_dir = (working_dir / rel_parent).resolve()
+        display_prefix = parent_part
+
+    if not base_dir.exists() or not base_dir.is_dir():
+        return []
+
+    replacements: list[str] = []
+    quote, has_closing_quote = enclosing_quote(raw_token)
+    direct_matches: list[tuple[str, Path, bool]] = []
+
+    def format_token(token: str) -> str:
+        if quote is not None:
+            inner = token.replace("\\", "\\\\")
+            if quote == '"':
+                inner = inner.replace('"', '\\"')
+            else:
+                inner = inner.replace("'", "\\'")
+            return quote + inner + (quote if has_closing_quote else "")
+        return shell_escape_fragment(token)
+
+    def push_replacement(token: str) -> None:
+        replacement = query[:start] + format_token(token) + query[end:]
+        replacements.append(replacement)
+
+    try:
+        with os.scandir(base_dir) as entries:
+            for entry in entries:
+                if entry.name.startswith(".") and not name_prefix.startswith("."):
+                    continue
+                if not entry.name.startswith(name_prefix):
+                    continue
+                if dirs_only and not entry.is_dir(follow_symlinks=False):
+                    continue
+                suggested_piece = entry.name
+                is_dir = entry.is_dir(follow_symlinks=False)
+                if is_dir:
+                    suggested_piece += "/"
+                if display_prefix in ("", "."):
+                    completed_token = suggested_piece
+                elif display_prefix == "/":
+                    completed_token = "/" + suggested_piece
+                else:
+                    completed_token = display_prefix.rstrip("/") + "/" + suggested_piece
+                direct_matches.append((completed_token, Path(entry.path), is_dir))
+    except OSError:
+        return []
+
+    direct_matches.sort(key=lambda item: item[0])
+    for completed_token, _, _ in direct_matches:
+        push_replacement(completed_token)
+        if len(replacements) >= limit:
+            return replacements
+
+    dir_matches = [item for item in direct_matches if item[2]]
+    if len(dir_matches) == 1:
+        matched_token, matched_path, _ = dir_matches[0]
+        try:
+            child_dirs: list[str] = []
+            with os.scandir(matched_path) as child_entries:
+                for child in child_entries:
+                    if not child.is_dir(follow_symlinks=False):
+                        continue
+                    child_dirs.append(child.name)
+            child_dirs.sort()
+            for child_name in child_dirs:
+                descendant_token = matched_token.rstrip("/") + "/" + child_name + "/"
+                push_replacement(descendant_token)
+                if len(replacements) >= limit:
+                    break
+        except OSError:
+            pass
+
+    return replacements
+
+
+_PATH_COMMANDS_CACHE: Optional[list[str]] = None
+
+
+def path_commands() -> list[str]:
+    global _PATH_COMMANDS_CACHE
+    if _PATH_COMMANDS_CACHE is not None:
+        return _PATH_COMMANDS_CACHE
+
+    commands: set[str] = set()
+    for path_dir in os.environ.get("PATH", "").split(os.pathsep):
+        if not path_dir:
+            continue
+        try:
+            with os.scandir(path_dir) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_file() and os.access(entry.path, os.X_OK):
+                            commands.add(entry.name)
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    _PATH_COMMANDS_CACHE = sorted(commands)
+    return _PATH_COMMANDS_CACHE
+
+
+def command_completion_replacements(query: str, cursor_pos: int, *, limit: int = 64) -> list[str]:
+    stripped = query.lstrip()
+    if not stripped:
+        return []
+    leading_ws = len(query) - len(stripped)
+    first_end = leading_ws
+    while first_end < len(query) and not query[first_end].isspace():
+        first_end += 1
+    if not (leading_ws <= cursor_pos <= first_end):
+        return []
+
+    prefix = query[leading_ws:first_end]
+    bare_prefix = strip_enclosing_quotes(prefix)
+    if not bare_prefix:
+        return []
+
+    replacements: list[str] = []
+    for cmd in path_commands():
+        if not cmd.startswith(bare_prefix):
+            continue
+        replacement = query[:leading_ws] + cmd + query[first_end:]
+        replacements.append(replacement)
+        if len(replacements) >= limit:
+            break
+    return replacements
+
+
+def resolve_runtime_matches(
+    query: str,
+    cursor_pos: int,
+    *,
+    cwd: Optional[Path] = None,
+    limit: int = 64,
+) -> list[MatchResult]:
+    if not query.strip():
+        return []
+
+    command = command_token_for_query(query) or ""
+    dirs_only = command == "cd"
+    runtime_candidates: list[str] = []
+    runtime_candidates.extend(
+        path_completion_replacements(
+            query,
+            cursor_pos,
+            cwd=cwd,
+            dirs_only=dirs_only,
+            limit=limit,
+        )
+    )
+    runtime_candidates.extend(command_completion_replacements(query, cursor_pos, limit=limit))
+
+    seen: set[str] = set()
+    resolved: list[MatchResult] = []
+    for candidate in runtime_candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        resolved.append(MatchResult(candidate, -10_000, []))
+        if len(resolved) >= limit:
+            break
+    return resolved
+
+
 def search(
     query: str,
     history: list[str],
     *,
+    cursor_pos: int = 0,
     candidate_indices: Optional[list[int]] = None,
     limit: int = 200,
 ) -> tuple[list[MatchResult], list[int]]:
@@ -319,7 +625,19 @@ def search(
         else:
             other_results.append(m)
 
-    return exact_results + other_results, matched_indices
+    regular_results = exact_results + other_results
+    if len(regular_results) >= limit:
+        return regular_results, matched_indices
+
+    seen = {item.text for item in regular_results}
+    for runtime_match in resolve_runtime_matches(query, cursor_pos):
+        if runtime_match.text in seen:
+            continue
+        regular_results.append(runtime_match)
+        if len(regular_results) >= limit:
+            break
+
+    return regular_results, matched_indices
 
 
 def truncate_text(text: str, width: int) -> str:
@@ -743,11 +1061,17 @@ def run(
             all_indices = list(range(len(history)))
             last_query = ""
             last_matched_indices = all_indices
-            initial_results, _ = search("", history, candidate_indices=all_indices, limit=500)
-            match_cache: dict[str, tuple[list[int], list[MatchResult]]] = {
-                "": (all_indices, initial_results)
+            initial_results, _ = search(
+                "",
+                history,
+                cursor_pos=cursor_pos,
+                candidate_indices=all_indices,
+                limit=500,
+            )
+            match_cache: dict[tuple[str, int], tuple[list[int], list[MatchResult]]] = {
+                ("", cursor_pos): (all_indices, initial_results)
             }
-            cache_order: list[str] = [""]
+            cache_order: list[tuple[str, int]] = [("", cursor_pos)]
             cache_limit = 128
             history_loading = history_updates is not None
             history_load_error = False
@@ -810,7 +1134,11 @@ def run(
                         sel_end = len(query)
                         cursor_pos = len(query)
     
-                    def cache_put(key: str, indices: list[int], cached_results: list[MatchResult]) -> None:
+                    def cache_put(
+                        key: tuple[str, int],
+                        indices: list[int],
+                        cached_results: list[MatchResult],
+                    ) -> None:
                         if key in match_cache:
                             return
                         if len(cache_order) >= cache_limit:
@@ -832,9 +1160,15 @@ def run(
                                     all_indices = list(range(len(history)))
                                     last_query = ""
                                     last_matched_indices = all_indices
-                                    initial_results, _ = search("", history, candidate_indices=all_indices, limit=500)
-                                    match_cache = {"": (all_indices, initial_results)}
-                                    cache_order = [""]
+                                    initial_results, _ = search(
+                                        "",
+                                        history,
+                                        cursor_pos=cursor_pos,
+                                        candidate_indices=all_indices,
+                                        limit=500,
+                                    )
+                                    match_cache = {("", cursor_pos): (all_indices, initial_results)}
+                                    cache_order = [("", cursor_pos)]
                                 history_loading = False
                             elif kind == "error":
                                 history_loading = False
@@ -842,8 +1176,9 @@ def run(
     
                     width = tty_terminal_size(fd).columns
                     visible = max(1, panel_rows - 1)
-                    if query in match_cache:
-                        matched_indices, results = match_cache[query]
+                    cache_key = (query, cursor_pos)
+                    if cache_key in match_cache:
+                        matched_indices, results = match_cache[cache_key]
                     else:
                         candidate_indices = all_indices
                         if query.startswith(last_query):
@@ -851,10 +1186,11 @@ def run(
                         results, matched_indices = search(
                             query,
                             history,
+                            cursor_pos=cursor_pos,
                             candidate_indices=candidate_indices,
                             limit=500,
                         )
-                        cache_put(query, matched_indices, results)
+                        cache_put(cache_key, matched_indices, results)
                     last_query = query
                     last_matched_indices = matched_indices
                     status_message = ""
