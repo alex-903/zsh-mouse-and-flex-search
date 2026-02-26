@@ -702,8 +702,7 @@ def run(history: list[str], *, inline_with_prompt: bool = False) -> Optional[str
                 if ev == "quit":
                     break
                 if ev == "enter":
-                    if 0 <= selected < len(results):
-                        chosen = results[selected].text
+                    chosen = query
                     break
                 if ev == "tab":
                     if 0 <= selected < len(results):
