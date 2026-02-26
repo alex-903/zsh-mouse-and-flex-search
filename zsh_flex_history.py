@@ -78,6 +78,8 @@ CLEAR_LINE = "\x1b[2K"
 CLEAR_TO_END = "\x1b[K"
 HIDE_CURSOR = "\x1b[?25l"
 SHOW_CURSOR = "\x1b[?25h"
+ENABLE_MOUSE = "\x1b[?1000h\x1b[?1002h\x1b[?1006h"
+DISABLE_MOUSE = "\x1b[?1000l\x1b[?1002l\x1b[?1006l"
 
 TERM_OUT = sys.stdout
 
@@ -113,13 +115,14 @@ class RawTerminal:
             termios.tcflush(self.fd, termios.TCIFLUSH)
         except termios.error:
             pass
+        term_write(ENABLE_MOUSE)
         # Keep the terminal's default cursor visible while editing input.
         term_write(SHOW_CURSOR)
         term_flush()
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
-        term_write(SHOW_CURSOR + RESET)
+        term_write(DISABLE_MOUSE + SHOW_CURSOR + RESET)
         term_flush()
         if self._old is not None:
             termios.tcsetattr(self.fd, termios.TCSADRAIN, self._old)
@@ -349,6 +352,105 @@ def draw_panel(
 
 
 def read_key(fd: int) -> tuple[str, object]:
+    def read_escape_tail() -> bytes:
+        # Read an escape sequence incrementally; macOS Terminal can split
+        # bytes across small intervals, so a single short poll is unreliable.
+        seq = b""
+        deadline = time.monotonic() + 0.05
+        while time.monotonic() < deadline:
+            rdy, _, _ = select.select([fd], [], [], 0.01)
+            if not rdy:
+                if seq:
+                    break
+                continue
+            chunk = os.read(fd, 64)
+            if not chunk:
+                break
+            seq += chunk
+            # Common CSI/SS3 final-byte termination.
+            if seq[-1:] and (64 <= seq[-1] <= 126):
+                break
+        return seq
+
+    def parse_csi_key(full: bytes) -> Optional[tuple[str, object]]:
+        m_u = re.fullmatch(rb"\x1b\[(\d+)(?:;(\d+))?u", full)
+        if m_u:
+            codepoint = int(m_u.group(1))
+            mod = int(m_u.group(2) or b"1")
+            shift = (mod - 1) & 1
+            ctrl = (mod - 1) & 4
+            alt = (mod - 1) & 2
+
+            if codepoint == 13:
+                return "enter", None
+            if codepoint == 9:
+                return "tab", None
+            if codepoint in (8, 127):
+                if ctrl:
+                    return "backspace_word", None
+                return "backspace", None
+            if codepoint == 27:
+                return "quit", None
+            if codepoint == 1 and ctrl:
+                return "home", None
+            if codepoint == 5 and ctrl:
+                return "end", None
+            if codepoint == 11 and ctrl:
+                return "kill_to_end", None
+            if codepoint == 21 and ctrl:
+                return "kill_to_start", None
+            if codepoint == 23 and ctrl:
+                return "backspace_word", None
+            if codepoint == 98 and alt:
+                return "word_left", None
+            if codepoint == 102 and alt:
+                return "word_right", None
+            if 32 <= codepoint < 127:
+                return "char", chr(codepoint)
+
+        # Handle modified cursor keys in CSI-u style (e.g. ESC [ 1 ; 2 D).
+        m = re.fullmatch(rb"\x1b\[(?:1;)?(\d+)([ABCDHF])", full)
+        if m:
+            mod = int(m.group(1))
+            key = m.group(2)
+            if mod in (1,):
+                if key == b"D":
+                    return "left", None
+                if key == b"C":
+                    return "right", None
+                if key == b"H":
+                    return "home", None
+                if key == b"F":
+                    return "end", None
+            if mod == 2:
+                if key == b"D":
+                    return "shift_left", None
+                if key == b"C":
+                    return "shift_right", None
+                if key == b"H":
+                    return "shift_home", None
+                if key == b"F":
+                    return "shift_end", None
+            if mod == 5:
+                if key == b"D":
+                    return "word_left", None
+                if key == b"C":
+                    return "word_right", None
+        # xterm/kitty ctrl+arrow variants.
+        if full in (b"\x1b[1;5D", b"\x1b[5D"):
+            return "word_left", None
+        if full in (b"\x1b[1;5C", b"\x1b[5C"):
+            return "word_right", None
+        if full in (b"\x1b[1;2D",):
+            return "shift_left", None
+        if full in (b"\x1b[1;2C",):
+            return "shift_right", None
+        if full in (b"\x1b[1;2H",):
+            return "shift_home", None
+        if full in (b"\x1b[1;2F",):
+            return "shift_end", None
+        return None
+
     while True:
         ready, _, _ = select.select([fd], [], [], 0.1)
         if not ready:
@@ -360,19 +462,24 @@ def read_key(fd: int) -> tuple[str, object]:
         ch = data[0]
         if ch == 3:
             return "quit", None
+        if ch == 1:
+            return "home", None
+        if ch == 5:
+            return "end", None
         if ch in (10, 13):
             return "enter", None
         if ch == 9:
             return "tab", None
         if ch in (8, 127):
             return "backspace", None
+        if ch == 23:
+            return "backspace_word", None
+        if ch == 21:
+            return "kill_to_start", None
+        if ch == 11:
+            return "kill_to_end", None
         if ch == 27:
-            seq = b""
-            while True:
-                rdy, _, _ = select.select([fd], [], [], 0.005)
-                if not rdy:
-                    break
-                seq += os.read(fd, 64)
+            seq = read_escape_tail()
             full = b"\x1b" + seq
             if full == b"\x1b":
                 return "quit", None
@@ -394,6 +501,9 @@ def read_key(fd: int) -> tuple[str, object]:
                 return "pgup", None
             if full in (b"\x1b[6~",):
                 return "pgdn", None
+            parsed = parse_csi_key(full)
+            if parsed is not None:
+                return parsed
 
             m = re.match(rb"\x1b\[<(\d+);(\d+);(\d+)([mM])", full)
             if m:
@@ -402,9 +512,32 @@ def read_key(fd: int) -> tuple[str, object]:
                 y = int(m.group(3))
                 action = m.group(4).decode("ascii")
                 return "mouse", (bstate, x, y, action)
+            if full in (b"\x1bb", b"\x1b[1;3D"):
+                return "word_left", None
+            if full in (b"\x1bf", b"\x1b[1;3C"):
+                return "word_right", None
             continue
         if 32 <= ch < 127:
             return "char", chr(ch)
+
+
+def move_word_left(query: str, cursor_pos: int) -> int:
+    i = max(0, min(cursor_pos, len(query)))
+    while i > 0 and query[i - 1].isspace():
+        i -= 1
+    while i > 0 and not query[i - 1].isspace():
+        i -= 1
+    return i
+
+
+def move_word_right(query: str, cursor_pos: int) -> int:
+    i = max(0, min(cursor_pos, len(query)))
+    n = len(query)
+    while i < n and not query[i].isspace():
+        i += 1
+    while i < n and query[i].isspace():
+        i += 1
+    return i
 
 
 def run(history: list[str], *, inline_with_prompt: bool = False) -> Optional[str]:
@@ -484,8 +617,33 @@ def run(history: list[str], *, inline_with_prompt: bool = False) -> Optional[str
             selected = 0
             offset = 0
             chosen: Optional[str] = None
+            query_start = 0
+            mouse_selecting = False
+            last_left_click_time = 0.0
+            last_left_click_row = -1
+            last_left_click_col = -1
 
             while True:
+                def clear_selection() -> None:
+                    nonlocal sel_anchor, sel_end
+                    sel_anchor = None
+                    sel_end = None
+
+                def move_cursor(new_pos: int, *, select_mode: bool = False) -> None:
+                    nonlocal cursor_pos, sel_anchor, sel_end
+                    new_pos = max(0, min(new_pos, len(query)))
+                    if select_mode:
+                        if sel_anchor is None:
+                            sel_anchor = cursor_pos
+                        cursor_pos = new_pos
+                        sel_end = cursor_pos
+                        if sel_anchor == sel_end:
+                            sel_anchor = None
+                            sel_end = None
+                        return
+                    cursor_pos = new_pos
+                    clear_selection()
+
                 width = shutil.get_terminal_size((120, 24)).columns
                 visible = 1
 
@@ -497,7 +655,7 @@ def run(history: list[str], *, inline_with_prompt: bool = False) -> Optional[str
                 if selected >= offset + visible:
                     offset = selected - visible + 1
 
-                draw_panel(
+                query_start, _query_view_len = draw_panel(
                     anchor_row,
                     anchor_col,
                     query,
@@ -523,30 +681,39 @@ def run(history: list[str], *, inline_with_prompt: bool = False) -> Optional[str
                     if 0 <= selected < len(results):
                         query = results[selected].text
                         cursor_pos = len(query)
-                        sel_anchor = None
-                        sel_end = None
+                        clear_selection()
                         selected = 0
                         offset = 0
                     continue
                 if ev == "left":
-                    cursor_pos = max(0, cursor_pos - 1)
-                    sel_anchor = None
-                    sel_end = None
+                    move_cursor(cursor_pos - 1)
                     continue
                 if ev == "right":
-                    cursor_pos = min(len(query), cursor_pos + 1)
-                    sel_anchor = None
-                    sel_end = None
+                    move_cursor(cursor_pos + 1)
+                    continue
+                if ev == "shift_left":
+                    move_cursor(cursor_pos - 1, select_mode=True)
+                    continue
+                if ev == "shift_right":
+                    move_cursor(cursor_pos + 1, select_mode=True)
                     continue
                 if ev == "home":
-                    cursor_pos = 0
-                    sel_anchor = None
-                    sel_end = None
+                    move_cursor(0)
+                    continue
+                if ev == "shift_home":
+                    move_cursor(0, select_mode=True)
                     continue
                 if ev == "end":
-                    cursor_pos = len(query)
-                    sel_anchor = None
-                    sel_end = None
+                    move_cursor(len(query))
+                    continue
+                if ev == "shift_end":
+                    move_cursor(len(query), select_mode=True)
+                    continue
+                if ev == "word_left":
+                    move_cursor(move_word_left(query, cursor_pos))
+                    continue
+                if ev == "word_right":
+                    move_cursor(move_word_right(query, cursor_pos))
                     continue
                 if ev == "up":
                     if results:
@@ -568,11 +735,47 @@ def run(history: list[str], *, inline_with_prompt: bool = False) -> Optional[str
                     if sel:
                         query = query[: sel[0]] + query[sel[1] :]
                         cursor_pos = sel[0]
-                        sel_anchor = None
-                        sel_end = None
+                        clear_selection()
                     elif cursor_pos > 0:
                         query = query[: cursor_pos - 1] + query[cursor_pos:]
                         cursor_pos -= 1
+                    selected = 0
+                    offset = 0
+                    continue
+                if ev == "backspace_word":
+                    sel = selection_bounds(sel_anchor, sel_end)
+                    if sel:
+                        query = query[: sel[0]] + query[sel[1] :]
+                        cursor_pos = sel[0]
+                        clear_selection()
+                    else:
+                        new_pos = move_word_left(query, cursor_pos)
+                        if new_pos < cursor_pos:
+                            query = query[:new_pos] + query[cursor_pos:]
+                            cursor_pos = new_pos
+                    selected = 0
+                    offset = 0
+                    continue
+                if ev == "kill_to_start":
+                    sel = selection_bounds(sel_anchor, sel_end)
+                    if sel:
+                        query = query[: sel[0]] + query[sel[1] :]
+                        cursor_pos = sel[0]
+                    else:
+                        query = query[cursor_pos:]
+                        cursor_pos = 0
+                    clear_selection()
+                    selected = 0
+                    offset = 0
+                    continue
+                if ev == "kill_to_end":
+                    sel = selection_bounds(sel_anchor, sel_end)
+                    if sel:
+                        query = query[: sel[0]] + query[sel[1] :]
+                        cursor_pos = sel[0]
+                    else:
+                        query = query[:cursor_pos]
+                    clear_selection()
                     selected = 0
                     offset = 0
                     continue
@@ -581,8 +784,7 @@ def run(history: list[str], *, inline_with_prompt: bool = False) -> Optional[str
                     if sel:
                         query = query[: sel[0]] + query[sel[1] :]
                         cursor_pos = sel[0]
-                        sel_anchor = None
-                        sel_end = None
+                        clear_selection()
                     elif cursor_pos < len(query):
                         query = query[:cursor_pos] + query[cursor_pos + 1 :]
                     selected = 0
@@ -594,14 +796,76 @@ def run(history: list[str], *, inline_with_prompt: bool = False) -> Optional[str
                     if sel:
                         query = query[: sel[0]] + ch + query[sel[1] :]
                         cursor_pos = sel[0] + 1
-                        sel_anchor = None
-                        sel_end = None
+                        clear_selection()
                     else:
                         query = query[:cursor_pos] + ch + query[cursor_pos:]
                         cursor_pos += 1
                     selected = 0
                     offset = 0
                     continue
+                if ev == "mouse":
+                    bstate, mx, my, action = payload  # type: ignore[misc]
+                    # Ignore wheel events so mouse wheel does not navigate results.
+                    if bstate & 64:
+                        continue
+                    button = bstate & 3
+                    is_motion = bool(bstate & 32)
+                    is_shift = bool(bstate & 4)
+
+                    # SGR mouse uses 'M' for press/motion, 'm' for release.
+                    if action == "m":
+                        if button in (0, 3):
+                            mouse_selecting = False
+                        continue
+                    if action != "M":
+                        continue
+
+                    # Query line interactions.
+                    if my == anchor_row:
+                        click_col = max(anchor_col, mx)
+                        click_pos = query_start + max(0, click_col - anchor_col)
+                        click_pos = max(0, min(click_pos, len(query)))
+
+                        if is_motion:
+                            if mouse_selecting:
+                                move_cursor(click_pos, select_mode=True)
+                            continue
+
+                        if button == 0:
+                            now = time.monotonic()
+                            is_double_click = (
+                                (now - last_left_click_time) <= 0.35
+                                and my == last_left_click_row
+                                and abs(mx - last_left_click_col) <= 1
+                            )
+                            last_left_click_time = now
+                            last_left_click_row = my
+                            last_left_click_col = mx
+
+                            if is_double_click and query:
+                                # Select a "word" delimited by whitespace.
+                                left = click_pos
+                                while left > 0 and not query[left - 1].isspace():
+                                    left -= 1
+                                right = click_pos
+                                while right < len(query) and not query[right].isspace():
+                                    right += 1
+                                if left != right:
+                                    sel_anchor = left
+                                    sel_end = right
+                                    cursor_pos = right
+                                else:
+                                    move_cursor(click_pos, select_mode=is_shift)
+                            else:
+                                move_cursor(click_pos, select_mode=is_shift)
+                                mouse_selecting = True
+                            continue
+
+                    # Result line click: select and accept current item.
+                    if my == anchor_row + 1 and results and not is_motion and button == 0:
+                        selected = min(len(results) - 1, max(offset, 0))
+                        chosen = results[selected].text
+                        break
         # Clear panel content so repeated invocations always start clean.
         for row in range(anchor_row, anchor_row + panel_rows):
             term_write(move_to(row, anchor_col) + CLEAR_TO_END)
