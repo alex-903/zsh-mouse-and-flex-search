@@ -185,6 +185,10 @@ def query_cursor_position(fd: int) -> Optional[tuple[int, int]]:
         buf += os.read(fd, 64)
         for m in re.finditer(rb"\x1b\[(\d+);(\d+)R", buf):
             last_match = (int(m.group(1)), int(m.group(2)))
+        if last_match is not None:
+            # Return as soon as we have a valid cursor report instead of
+            # waiting out the full timeout on every startup.
+            break
     return last_match
 
 
