@@ -4,18 +4,20 @@
 from __future__ import annotations
 
 import os
+import queue
 import re
 import select
 import shutil
 import subprocess
 import sys
 import termios
+import threading
 import time
 import tty
 from argparse import ArgumentParser
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import List, Optional
 
 
 BASE16_TO_ANSI = {
@@ -207,6 +209,21 @@ def load_history(path: Path) -> list[str]:
     return dedup
 
 
+def spawn_history_loader(path: Path) -> queue.Queue[tuple[str, object]]:
+    updates: queue.Queue[tuple[str, object]] = queue.Queue()
+
+    def _load() -> None:
+        try:
+            loaded = load_history(path)
+            updates.put(("loaded", loaded))
+        except Exception as exc:
+            updates.put(("error", exc))
+
+    thread = threading.Thread(target=_load, daemon=True, name="history-loader")
+    thread.start()
+    return updates
+
+
 def flex_match(query: str, candidate: str) -> Optional[MatchResult]:
     if not query:
         return MatchResult(candidate, 0, [])
@@ -257,19 +274,44 @@ def flex_match(query: str, candidate: str) -> Optional[MatchResult]:
     return MatchResult(candidate, score, positions)
 
 
-def search(query: str, history: Iterable[str], limit: int = 200) -> list[MatchResult]:
-    results: list[MatchResult] = []
-    normalized_query = query.strip().lower()
-    for i, cmd in enumerate(history):
-        m = flex_match(query, cmd)
-        if m is not None:
-            m.exact = bool(normalized_query) and cmd.strip().lower() == normalized_query
-            # load_history() already returns commands in most-recent-first order.
-            m.recency = -i
-            results.append(m)
+def search(
+    query: str,
+    history: list[str],
+    *,
+    candidate_indices: Optional[list[int]] = None,
+    limit: int = 200,
+) -> tuple[list[MatchResult], list[int]]:
+    candidates = candidate_indices if candidate_indices is not None else list(range(len(history)))
+    if not query:
+        results: list[MatchResult] = []
+        for idx in candidates[:limit]:
+            cmd = history[idx]
+            results.append(MatchResult(cmd, 0, [], exact=False, recency=-idx))
+        return results, candidates
 
-    results.sort(key=lambda m: (m.exact, m.recency), reverse=True)
-    return results[:limit]
+    matched_indices: list[int] = []
+    exact_results: list[MatchResult] = []
+    other_results: list[MatchResult] = []
+    normalized_query = query.strip().lower()
+
+    for idx in candidates:
+        cmd = history[idx]
+        m = flex_match(query, cmd)
+        if m is None:
+            continue
+
+        matched_indices.append(idx)
+        if len(exact_results) + len(other_results) >= limit:
+            continue
+
+        m.exact = bool(normalized_query) and cmd.strip().lower() == normalized_query
+        m.recency = -idx
+        if m.exact:
+            exact_results.append(m)
+        else:
+            other_results.append(m)
+
+    return exact_results + other_results, matched_indices
 
 
 def truncate_text(text: str, width: int) -> str:
@@ -333,6 +375,7 @@ def draw_panel(
     offset: int,
     panel_rows: int,
     width: int,
+    status_message: str = "",
 ) -> tuple[int, int]:
     anchor_col = max(1, anchor_col)
     render_width = max(1, width - anchor_col + 1)
@@ -356,7 +399,10 @@ def draw_panel(
     for i in range(visible):
         idx = offset + i
         if idx >= len(results):
-            lines.append("")
+            if i == 0 and status_message:
+                lines.append(f"{style(fg=base16_ansi('base03'))}{status_message}{RESET}")
+            else:
+                lines.append("")
             continue
         remaining = max(0, len(results) - (offset + visible))
         is_last_visible_row = i == (visible - 1)
@@ -583,7 +629,12 @@ def move_word_right(query: str, cursor_pos: int) -> int:
     return i
 
 
-def run(history: list[str], *, inline_with_prompt: bool = False) -> Optional[str]:
+def run(
+    history: list[str],
+    *,
+    inline_with_prompt: bool = False,
+    history_updates: Optional[queue.Queue[tuple[str, object]]] = None,
+) -> Optional[str]:
     global TERM_OUT
     tty_in_file = None
     tty_out_file = None
@@ -661,6 +712,17 @@ def run(history: list[str], *, inline_with_prompt: bool = False) -> Optional[str
             offset = 0
             chosen: Optional[str] = None
             query_start = 0
+            all_indices = list(range(len(history)))
+            last_query = ""
+            last_matched_indices = all_indices
+            initial_results, _ = search("", history, candidate_indices=all_indices, limit=500)
+            match_cache: dict[str, tuple[list[int], list[MatchResult]]] = {
+                "": (all_indices, initial_results)
+            }
+            cache_order: list[str] = [""]
+            cache_limit = 128
+            history_loading = history_updates is not None
+            history_load_error = False
             mouse_selecting = False
             mouse_enabled = False
             last_left_click_time = 0.0
@@ -701,10 +763,58 @@ def run(history: list[str], *, inline_with_prompt: bool = False) -> Optional[str
                         mouse_enabled = False
                         mouse_selecting = False
 
+                def cache_put(key: str, indices: list[int], cached_results: list[MatchResult]) -> None:
+                    if key in match_cache:
+                        return
+                    if len(cache_order) >= cache_limit:
+                        oldest = cache_order.pop(0)
+                        match_cache.pop(oldest, None)
+                    cache_order.append(key)
+                    match_cache[key] = (indices, cached_results)
+
+                if history_updates is not None:
+                    while True:
+                        try:
+                            kind, payload = history_updates.get_nowait()
+                        except queue.Empty:
+                            break
+                        if kind == "loaded":
+                            loaded_history = payload
+                            if isinstance(loaded_history, list):
+                                history = loaded_history
+                                all_indices = list(range(len(history)))
+                                last_query = ""
+                                last_matched_indices = all_indices
+                                initial_results, _ = search("", history, candidate_indices=all_indices, limit=500)
+                                match_cache = {"": (all_indices, initial_results)}
+                                cache_order = [""]
+                            history_loading = False
+                        elif kind == "error":
+                            history_loading = False
+                            history_load_error = True
+
                 width = shutil.get_terminal_size((120, 24)).columns
                 visible = max(1, panel_rows - 1)
-
-                results = search(query, history, limit=500)
+                if query in match_cache:
+                    matched_indices, results = match_cache[query]
+                else:
+                    candidate_indices = all_indices
+                    if query.startswith(last_query):
+                        candidate_indices = last_matched_indices
+                    results, matched_indices = search(
+                        query,
+                        history,
+                        candidate_indices=candidate_indices,
+                        limit=500,
+                    )
+                    cache_put(query, matched_indices, results)
+                last_query = query
+                last_matched_indices = matched_indices
+                status_message = ""
+                if history_loading and not results:
+                    status_message = "loading history..."
+                elif history_load_error and not results:
+                    status_message = "history load failed"
                 if selected >= len(results):
                     selected = max(0, len(results) - 1)
                 if selected < offset:
@@ -724,6 +834,7 @@ def run(history: list[str], *, inline_with_prompt: bool = False) -> Optional[str
                     offset,
                     panel_rows,
                     width,
+                    status_message=status_message,
                 )
 
                 ev, payload = read_key(fd)
@@ -975,12 +1086,8 @@ def main() -> int:
     args = parser.parse_args()
 
     history_path = Path(os.environ.get("HISTFILE", str(Path.home() / ".zsh_history"))).expanduser()
-    history = load_history(history_path)
-    if not history:
-        print(f"No zsh history found at {history_path}", file=sys.stderr)
-        return 1
-
-    selected = run(history, inline_with_prompt=args.print_only)
+    history_updates = spawn_history_loader(history_path)
+    selected = run([], inline_with_prompt=args.print_only, history_updates=history_updates)
     if selected:
         if args.print_only:
             print(selected)
