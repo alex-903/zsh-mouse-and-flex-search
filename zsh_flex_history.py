@@ -640,6 +640,7 @@ def search(
     exact_results: list[MatchResult] = []
     other_results: list[MatchResult] = []
     normalized_query = query.strip().lower()
+    query_prefix = query.lstrip().lower()
 
     for idx in candidates:
         cmd = history[idx]
@@ -648,8 +649,6 @@ def search(
             continue
 
         matched_indices.append(idx)
-        if result_limit is not None and len(exact_results) + len(other_results) >= result_limit:
-            continue
 
         m.exact = bool(normalized_query) and cmd.strip().lower() == normalized_query
         m.recency = -idx
@@ -659,18 +658,48 @@ def search(
             other_results.append(m)
 
     regular_results = exact_results + other_results
-    if result_limit is not None and len(regular_results) >= result_limit:
-        return regular_results, matched_indices
 
     seen = {item.text for item in regular_results}
     for runtime_match in resolve_runtime_matches(query, cursor_pos):
         if runtime_match.text in seen:
             continue
         regular_results.append(runtime_match)
-        if result_limit is not None and len(regular_results) >= result_limit:
-            break
 
-    return regular_results, matched_indices
+    if not regular_results:
+        return regular_results, matched_indices
+
+    # Globally prioritize the longest possible start-of-input prefix match
+    # across history/runtime candidates. This works for partial words and
+    # multi-word input alike.
+    prefix_lengths: list[int] = []
+    max_prefix_len = 0
+    if query_prefix:
+        for item in regular_results:
+            text_lower = item.text.lower()
+            match_len = 0
+            max_check = min(len(query_prefix), len(text_lower))
+            while match_len < max_check and query_prefix[match_len] == text_lower[match_len]:
+                match_len += 1
+            prefix_lengths.append(match_len)
+            if match_len > max_prefix_len:
+                max_prefix_len = match_len
+    else:
+        prefix_lengths = [0] * len(regular_results)
+
+    if max_prefix_len > 0:
+        tier_prefix: list[MatchResult] = []
+        tier_rest: list[MatchResult] = []
+        for item, prefix_len in zip(regular_results, prefix_lengths):
+            if prefix_len == max_prefix_len:
+                tier_prefix.append(item)
+            else:
+                tier_rest.append(item)
+        ordered_results = tier_prefix + tier_rest
+    else:
+        ordered_results = regular_results
+    if result_limit is not None:
+        ordered_results = ordered_results[:result_limit]
+    return ordered_results, matched_indices
 
 
 def truncate_text(text: str, width: int) -> str:
