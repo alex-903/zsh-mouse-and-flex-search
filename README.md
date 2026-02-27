@@ -1,4 +1,4 @@
-# zsh flex history search
+# zsh mouse and flex history search
 
 ![zsh flex history screenshot](./screenshot.png)
 
@@ -29,5 +29,5 @@ python3 zsh_flex_history.py
 - `Tab`: inserts selected command
 - `PageUp` / `PageDown`: move faster
 - `Backspace`: delete query char
-- `Enter`: print and optionall runs the selected command
+- `Enter`: print and optionally runs the selected command
 - `Esc` or `Ctrl-C`: quit
