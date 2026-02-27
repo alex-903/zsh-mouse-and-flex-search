@@ -637,8 +637,7 @@ def search(
         return results, candidates
 
     matched_indices: list[int] = []
-    exact_results: list[MatchResult] = []
-    other_results: list[MatchResult] = []
+    history_results: list[MatchResult] = []
     normalized_query = query.strip().lower()
     query_prefix = query.lstrip().lower()
 
@@ -652,12 +651,9 @@ def search(
 
         m.exact = bool(normalized_query) and cmd.strip().lower() == normalized_query
         m.recency = -idx
-        if m.exact:
-            exact_results.append(m)
-        else:
-            other_results.append(m)
+        history_results.append(m)
 
-    regular_results = exact_results + other_results
+    regular_results = history_results
 
     seen = {item.text for item in regular_results}
     for runtime_match in resolve_runtime_matches(query, cursor_pos):
