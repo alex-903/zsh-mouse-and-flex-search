@@ -206,36 +206,47 @@ def load_history(path: Path) -> list[str]:
     raw = path.read_text(encoding="utf-8", errors="replace")
     normalized = raw.replace("\r\n", "\n").replace("\r", "\n")
 
-    # zsh extended history format:
+    # Support plain history and extended history in the same file.
+    # Extended entry format:
     #   : 1700012345:0;command
-    # Commands can span multiple physical lines in the history file.
-    header_re = re.compile(r"^: \d+:\d+;", re.MULTILINE)
-    headers = list(header_re.finditer(normalized))
+    header_line_re = re.compile(r"^: \d+:\d+;(.*)$")
+    current_extended: Optional[str] = None
 
-    if headers:
-        for i, match in enumerate(headers):
-            cmd_start = match.end()
-            cmd_end = headers[i + 1].start() if i + 1 < len(headers) else len(normalized)
-            cmd = normalized[cmd_start:cmd_end]
-            # Drop the entry terminator newline and join zsh continuation lines.
-            cmd = cmd.rstrip("\n").replace("\\\n", "")
-            cmd = cmd.strip()
-            if cmd:
-                entries.append(cmd)
-    else:
-        for line in normalized.split("\n"):
-            line = line.strip()
-            if line:
-                entries.append(line)
+    def push_entry(text: str) -> None:
+        cmd = text.rstrip("\n").replace("\\\n", "").strip()
+        if cmd:
+            entries.append(cmd)
 
-    dedup: list[str] = []
-    seen = set()
-    for cmd in reversed(entries):
+    for line in normalized.split("\n"):
+        match = header_line_re.match(line)
+        if match:
+            if current_extended is not None:
+                push_entry(current_extended)
+            current_extended = match.group(1)
+            continue
+
+        if current_extended is not None:
+            current_extended += "\n" + line
+            continue
+
+        plain = line.strip()
+        if plain:
+            entries.append(plain)
+
+    if current_extended is not None:
+        push_entry(current_extended)
+
+    # Preserve recency ordering (newest first), then remove duplicate command
+    # text while keeping the newest occurrence of each command.
+    newest_first = list(reversed(entries))
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for cmd in newest_first:
         if cmd in seen:
             continue
         seen.add(cmd)
-        dedup.append(cmd)
-    return dedup
+        deduped.append(cmd)
+    return deduped
 
 
 def spawn_history_loader(path: Path) -> queue.Queue[tuple[str, object]]:
@@ -613,12 +624,14 @@ def search(
     *,
     cursor_pos: int = 0,
     candidate_indices: Optional[list[int]] = None,
-    limit: int = 200,
+    limit: Optional[int] = None,
 ) -> tuple[list[MatchResult], list[int]]:
     candidates = candidate_indices if candidate_indices is not None else list(range(len(history)))
+    result_limit = limit if (limit is None or limit > 0) else None
     if not query:
         results: list[MatchResult] = []
-        for idx in candidates[:limit]:
+        source = candidates if result_limit is None else candidates[:result_limit]
+        for idx in source:
             cmd = history[idx]
             results.append(MatchResult(cmd, 0, [], exact=False, recency=-idx))
         return results, candidates
@@ -635,7 +648,7 @@ def search(
             continue
 
         matched_indices.append(idx)
-        if len(exact_results) + len(other_results) >= limit:
+        if result_limit is not None and len(exact_results) + len(other_results) >= result_limit:
             continue
 
         m.exact = bool(normalized_query) and cmd.strip().lower() == normalized_query
@@ -646,7 +659,7 @@ def search(
             other_results.append(m)
 
     regular_results = exact_results + other_results
-    if len(regular_results) >= limit:
+    if result_limit is not None and len(regular_results) >= result_limit:
         return regular_results, matched_indices
 
     seen = {item.text for item in regular_results}
@@ -654,7 +667,7 @@ def search(
         if runtime_match.text in seen:
             continue
         regular_results.append(runtime_match)
-        if len(regular_results) >= limit:
+        if result_limit is not None and len(regular_results) >= result_limit:
             break
 
     return regular_results, matched_indices
@@ -1090,7 +1103,6 @@ def run(
                 history,
                 cursor_pos=cursor_pos,
                 candidate_indices=all_indices,
-                limit=500,
             )
             match_cache: dict[tuple[str, int], tuple[list[int], list[MatchResult]]] = {
                 ("", cursor_pos): (all_indices, initial_results)
@@ -1189,7 +1201,6 @@ def run(
                                         history,
                                         cursor_pos=cursor_pos,
                                         candidate_indices=all_indices,
-                                        limit=500,
                                     )
                                     match_cache = {("", cursor_pos): (all_indices, initial_results)}
                                     cache_order = [("", cursor_pos)]
@@ -1212,7 +1223,6 @@ def run(
                             history,
                             cursor_pos=cursor_pos,
                             candidate_indices=candidate_indices,
-                            limit=500,
                         )
                         cache_put(cache_key, matched_indices, results)
                     last_query = query
