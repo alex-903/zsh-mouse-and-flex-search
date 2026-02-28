@@ -638,7 +638,10 @@ def resolve_runtime_matches(
         if candidate in seen:
             continue
         seen.add(candidate)
-        resolved.append(MatchResult(candidate, -10_000, []))
+        matched = flex_match(query, candidate)
+        positions = matched.positions if matched is not None else []
+        score = matched.score if matched is not None else -10_000
+        resolved.append(MatchResult(candidate, score, positions))
         if len(resolved) >= limit:
             break
     return resolved
@@ -651,15 +654,26 @@ def search_history_only(
     candidate_indices: Optional[list[int]] = None,
     limit: Optional[int] = None,
 ) -> tuple[list[MatchResult], list[int]]:
-    candidates = candidate_indices if candidate_indices is not None else list(range(len(history)))
+    candidates: range | list[int]
+    if candidate_indices is None:
+        candidates = range(len(history))
+    else:
+        candidates = candidate_indices
     result_limit = limit if (limit is None or limit > 0) else None
     if not query:
         results: list[MatchResult] = []
-        source = candidates if result_limit is None else candidates[:result_limit]
+        if result_limit is None:
+            source = candidates
+        elif candidate_indices is None:
+            source = range(min(result_limit, len(history)))
+        else:
+            source = candidate_indices[:result_limit]
         for idx in source:
             cmd = history[idx]
             results.append(MatchResult(cmd, 0, [], exact=False, recency=-idx))
-        return results, candidates
+        if candidate_indices is None:
+            return results, list(range(len(history)))
+        return results, candidate_indices
 
     matched_indices: list[int] = []
     history_results: list[MatchResult] = []
@@ -1081,12 +1095,13 @@ def run_history_daemon(history_path: Path, socket_path: Path, *, debug: bool = F
                     raw_limit = request.get("limit")
                     limit = raw_limit if isinstance(raw_limit, int) else None
 
-                    history_results, matched_indices = search_history_only(
+                    history_results_all, matched_indices = search_history_only(
                         query,
                         history,
                         candidate_indices=candidate_indices,
-                        limit=limit,
+                        limit=None,
                     )
+                    history_results = apply_prefix_priority(query, history_results_all, limit=limit)
                     matched_count = len(matched_indices)
                     # Avoid sending a huge full-history index list for the
                     # empty query on startup; for any non-empty query, return
@@ -1595,65 +1610,65 @@ def run(
                 term_write(move_to(start_row, start_col))
                 term_flush()
 
-            try:
-                while True:
-                    def clear_selection() -> None:
-                        nonlocal sel_anchor, sel_end
+            def clear_selection() -> None:
+                nonlocal sel_anchor, sel_end
+                sel_anchor = None
+                sel_end = None
+
+            def move_cursor(new_pos: int, *, select_mode: bool = False) -> None:
+                nonlocal cursor_pos, sel_anchor, sel_end
+                new_pos = max(0, min(new_pos, len(query)))
+                if select_mode:
+                    if sel_anchor is None:
+                        sel_anchor = cursor_pos
+                    cursor_pos = new_pos
+                    sel_end = cursor_pos
+                    if sel_anchor == sel_end:
                         sel_anchor = None
                         sel_end = None
+                    return
+                cursor_pos = new_pos
+                clear_selection()
 
-                    def move_cursor(new_pos: int, *, select_mode: bool = False) -> None:
-                        nonlocal cursor_pos, sel_anchor, sel_end
-                        new_pos = max(0, min(new_pos, len(query)))
-                        if select_mode:
-                            if sel_anchor is None:
-                                sel_anchor = cursor_pos
-                            cursor_pos = new_pos
-                            sel_end = cursor_pos
-                            if sel_anchor == sel_end:
-                                sel_anchor = None
-                                sel_end = None
-                            return
-                        cursor_pos = new_pos
-                        clear_selection()
-    
-                    def sync_mouse_mode() -> None:
-                        nonlocal mouse_enabled, mouse_selecting
-                        should_enable = len(query) > 0
-                        if should_enable and not mouse_enabled:
-                            term_write(ENABLE_MOUSE)
-                            term_flush()
-                            mouse_enabled = True
-                        elif not should_enable and mouse_enabled:
-                            term_write(DISABLE_MOUSE)
-                            term_flush()
-                            mouse_enabled = False
-                            mouse_selecting = False
-    
-                    def select_all_query() -> None:
-                        nonlocal sel_anchor, sel_end, cursor_pos
-                        if not query:
-                            clear_selection()
-                            return
-                        sel_anchor = 0
-                        sel_end = len(query)
-                        cursor_pos = len(query)
-    
-                    def cache_put(
-                        key: tuple[str, int],
-                        indices: Optional[list[int]],
-                        cached_results: list[MatchResult],
-                        matched_count: Optional[int],
-                        total_count: int,
-                    ) -> None:
-                        if key in match_cache:
-                            return
-                        if len(cache_order) >= cache_limit:
-                            oldest = cache_order.pop(0)
-                            match_cache.pop(oldest, None)
-                        cache_order.append(key)
-                        match_cache[key] = (indices, cached_results, matched_count, total_count)
-    
+            def sync_mouse_mode() -> None:
+                nonlocal mouse_enabled, mouse_selecting
+                should_enable = len(query) > 0
+                if should_enable and not mouse_enabled:
+                    term_write(ENABLE_MOUSE)
+                    term_flush()
+                    mouse_enabled = True
+                elif not should_enable and mouse_enabled:
+                    term_write(DISABLE_MOUSE)
+                    term_flush()
+                    mouse_enabled = False
+                    mouse_selecting = False
+
+            def select_all_query() -> None:
+                nonlocal sel_anchor, sel_end, cursor_pos
+                if not query:
+                    clear_selection()
+                    return
+                sel_anchor = 0
+                sel_end = len(query)
+                cursor_pos = len(query)
+
+            def cache_put(
+                key: tuple[str, int],
+                indices: Optional[list[int]],
+                cached_results: list[MatchResult],
+                matched_count: Optional[int],
+                total_count: int,
+            ) -> None:
+                if key in match_cache:
+                    return
+                if len(cache_order) >= cache_limit:
+                    oldest = cache_order.pop(0)
+                    match_cache.pop(oldest, None)
+                cache_order.append(key)
+                match_cache[key] = (indices, cached_results, matched_count, total_count)
+
+            try:
+                while True:
                     if history_updates is not None and history_client is None:
                         while True:
                             try:
