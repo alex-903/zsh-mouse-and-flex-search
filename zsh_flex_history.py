@@ -4,21 +4,24 @@
 from __future__ import annotations
 
 import os
+import json
 import queue
 import re
 import select
 import shlex
 import shutil
+import socket
 import subprocess
 import sys
 import termios
 import threading
 import time
+import tempfile
 import tty
-from argparse import ArgumentParser
+from argparse import SUPPRESS, ArgumentParser
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 
 
 BASE16_TO_ANSI = {
@@ -83,6 +86,7 @@ HIDE_CURSOR = "\x1b[?25l"
 SHOW_CURSOR = "\x1b[?25h"
 ENABLE_MOUSE = "\x1b[?1000h\x1b[?1002h\x1b[?1006h"
 DISABLE_MOUSE = "\x1b[?1000l\x1b[?1002l\x1b[?1006l"
+MAX_RETURNED_RESULTS = 100
 
 TERM_OUT = sys.stdout
 
@@ -262,6 +266,28 @@ def spawn_history_loader(path: Path) -> queue.Queue[tuple[str, object]]:
     thread = threading.Thread(target=_load, daemon=True, name="history-loader")
     thread.start()
     return updates
+
+
+def default_daemon_socket_path() -> Path:
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR")
+    if runtime_dir:
+        base_dir = Path(runtime_dir)
+    else:
+        base_dir = Path(tempfile.gettempdir())
+    return base_dir / f"zsh-flex-history-{os.getuid()}.sock"
+
+
+def history_file_signature(path: Path) -> tuple[int, int]:
+    try:
+        st = path.stat()
+    except OSError:
+        return (0, 0)
+    return (st.st_mtime_ns, st.st_size)
+
+
+def daemon_debug_log(enabled: bool, message: str) -> None:
+    if enabled:
+        print(f"[zsh_flex_history daemon] {message}", file=sys.stderr)
 
 
 def flex_match(query: str, candidate: str) -> Optional[MatchResult]:
@@ -618,11 +644,10 @@ def resolve_runtime_matches(
     return resolved
 
 
-def search(
+def search_history_only(
     query: str,
     history: list[str],
     *,
-    cursor_pos: int = 0,
     candidate_indices: Optional[list[int]] = None,
     limit: Optional[int] = None,
 ) -> tuple[list[MatchResult], list[int]]:
@@ -639,7 +664,6 @@ def search(
     matched_indices: list[int] = []
     history_results: list[MatchResult] = []
     normalized_query = query.strip().lower()
-    query_prefix = query.lstrip().lower()
 
     for idx in candidates:
         cmd = history[idx]
@@ -653,24 +677,21 @@ def search(
         m.recency = -idx
         history_results.append(m)
 
-    regular_results = history_results
+    if result_limit is not None:
+        history_results = history_results[:result_limit]
+    return history_results, matched_indices
 
-    seen = {item.text for item in regular_results}
-    for runtime_match in resolve_runtime_matches(query, cursor_pos):
-        if runtime_match.text in seen:
-            continue
-        regular_results.append(runtime_match)
 
-    if not regular_results:
-        return regular_results, matched_indices
+def apply_prefix_priority(query: str, results: list[MatchResult], *, limit: Optional[int] = None) -> list[MatchResult]:
+    result_limit = limit if (limit is None or limit > 0) else None
+    if not results:
+        return results
 
-    # Globally prioritize the longest possible start-of-input prefix match
-    # across history/runtime candidates. This works for partial words and
-    # multi-word input alike.
+    query_prefix = query.lstrip().lower()
     prefix_lengths: list[int] = []
     max_prefix_len = 0
     if query_prefix:
-        for item in regular_results:
+        for item in results:
             text_lower = item.text.lower()
             match_len = 0
             max_check = min(len(query_prefix), len(text_lower))
@@ -680,22 +701,414 @@ def search(
             if match_len > max_prefix_len:
                 max_prefix_len = match_len
     else:
-        prefix_lengths = [0] * len(regular_results)
+        prefix_lengths = [0] * len(results)
 
     if max_prefix_len > 0:
         tier_prefix: list[MatchResult] = []
         tier_rest: list[MatchResult] = []
-        for item, prefix_len in zip(regular_results, prefix_lengths):
+        for item, prefix_len in zip(results, prefix_lengths):
             if prefix_len == max_prefix_len:
                 tier_prefix.append(item)
             else:
                 tier_rest.append(item)
         ordered_results = tier_prefix + tier_rest
     else:
-        ordered_results = regular_results
+        ordered_results = results
     if result_limit is not None:
-        ordered_results = ordered_results[:result_limit]
-    return ordered_results, matched_indices
+        return ordered_results[:result_limit]
+    return ordered_results
+
+
+def merge_runtime_and_rank(
+    query: str,
+    cursor_pos: int,
+    history_results: list[MatchResult],
+    *,
+    limit: Optional[int] = None,
+) -> list[MatchResult]:
+    regular_results = list(history_results)
+
+    seen = {item.text for item in regular_results}
+    for runtime_match in resolve_runtime_matches(query, cursor_pos):
+        if runtime_match.text in seen:
+            continue
+        regular_results.append(runtime_match)
+
+    return apply_prefix_priority(query, regular_results, limit=limit)
+
+
+def search(
+    query: str,
+    history: list[str],
+    *,
+    cursor_pos: int = 0,
+    candidate_indices: Optional[list[int]] = None,
+    limit: Optional[int] = None,
+) -> tuple[list[MatchResult], list[int]]:
+    history_results, matched_indices = search_history_only(
+        query,
+        history,
+        candidate_indices=candidate_indices,
+    )
+    results = merge_runtime_and_rank(
+        query,
+        cursor_pos,
+        history_results,
+        limit=limit,
+    )
+    return results, matched_indices
+
+
+def match_result_to_payload(item: MatchResult) -> dict[str, Any]:
+    return {
+        "text": item.text,
+        "score": item.score,
+        "positions": item.positions,
+        "exact": item.exact,
+        "recency": item.recency,
+    }
+
+
+def match_result_from_payload(payload: object) -> Optional[MatchResult]:
+    if not isinstance(payload, dict):
+        return None
+    text = payload.get("text")
+    score = payload.get("score")
+    positions = payload.get("positions")
+    exact = payload.get("exact", False)
+    recency = payload.get("recency", 0)
+    if not isinstance(text, str) or not isinstance(score, int) or not isinstance(positions, list):
+        return None
+    parsed_positions: list[int] = []
+    for pos in positions:
+        if not isinstance(pos, int):
+            return None
+        parsed_positions.append(pos)
+    return MatchResult(
+        text=text,
+        score=score,
+        positions=parsed_positions,
+        exact=bool(exact),
+        recency=int(recency) if isinstance(recency, int) else 0,
+    )
+
+
+def daemon_send_request(socket_path: Path, payload: dict[str, Any], *, timeout: float = 0.5) -> Optional[dict[str, Any]]:
+    data = (json.dumps(payload, separators=(",", ":")) + "\n").encode("utf-8")
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(timeout)
+            sock.connect(str(socket_path))
+            sock.sendall(data)
+            chunks: list[bytes] = []
+            total = 0
+            limit = 64 * 1024 * 1024
+            while True:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+                if total > limit:
+                    return None
+                if b"\n" in chunk:
+                    break
+    except OSError:
+        return None
+
+    raw = b"".join(chunks)
+    if not raw:
+        return None
+    line = raw.split(b"\n", 1)[0].strip()
+    if not line:
+        return None
+    try:
+        decoded = json.loads(line.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(decoded, dict):
+        return None
+    return decoded
+
+
+def launch_history_daemon(script_path: Path, history_path: Path, socket_path: Path) -> bool:
+    try:
+        socket_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return False
+
+    cmd = [
+        sys.executable,
+        str(script_path),
+        "--daemon",
+        "--history-file",
+        str(history_path),
+        "--socket-path",
+        str(socket_path),
+    ]
+    try:
+        subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            close_fds=True,
+        )
+    except OSError:
+        return False
+    return True
+
+
+class HistoryDaemonClient:
+    def __init__(self, socket_path: Path, history_path: Path, script_path: Path, *, debug: bool = False) -> None:
+        self.socket_path = socket_path
+        self.history_path = history_path
+        self.script_path = script_path
+        self.debug = debug
+
+    def ensure_running(self) -> bool:
+        ping = daemon_send_request(self.socket_path, {"action": "ping"}, timeout=0.15)
+        if isinstance(ping, dict) and ping.get("ok") is True:
+            daemon_debug_log(self.debug, f"using existing daemon at {self.socket_path}")
+            self._debug_log_baseline_count()
+            return True
+
+        if self.socket_path.exists():
+            try:
+                self.socket_path.unlink()
+                daemon_debug_log(self.debug, f"removed stale socket at {self.socket_path}")
+            except OSError:
+                pass
+
+        daemon_debug_log(self.debug, f"starting new daemon at {self.socket_path}")
+        if not launch_history_daemon(self.script_path, self.history_path, self.socket_path):
+            daemon_debug_log(self.debug, "failed to launch daemon process")
+            return False
+
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            ping = daemon_send_request(self.socket_path, {"action": "ping"}, timeout=0.15)
+            if isinstance(ping, dict) and ping.get("ok") is True:
+                daemon_debug_log(self.debug, "new daemon is ready")
+                self._debug_log_baseline_count()
+                return True
+            time.sleep(0.03)
+        daemon_debug_log(self.debug, "daemon did not become ready before timeout")
+        return False
+
+    def _debug_log_baseline_count(self) -> None:
+        if not self.debug:
+            return
+        response = daemon_send_request(
+            self.socket_path,
+            {"action": "search_history", "query": "", "limit": 1},
+            timeout=0.2,
+        )
+        if not isinstance(response, dict) or response.get("ok") is not True:
+            daemon_debug_log(self.debug, "matched_count=<unavailable>")
+            return
+        raw_count = response.get("matched_count")
+        count = raw_count if isinstance(raw_count, int) else 0
+        daemon_debug_log(self.debug, f"matched_count={count} for empty query")
+
+    def search_history(
+        self,
+        query: str,
+        *,
+        candidate_indices: Optional[list[int]] = None,
+        limit: Optional[int] = None,
+    ) -> Optional[tuple[list[MatchResult], Optional[list[int]], int]]:
+        payload: dict[str, Any] = {"action": "search_history", "query": query}
+        if candidate_indices is not None and len(candidate_indices) <= 10_000:
+            payload["candidate_indices"] = candidate_indices
+        if limit is not None:
+            payload["limit"] = limit
+
+        response = daemon_send_request(self.socket_path, payload)
+        if response is None:
+            if not self.ensure_running():
+                return None
+            response = daemon_send_request(self.socket_path, payload)
+            if response is None:
+                return None
+
+        if response.get("ok") is not True:
+            return None
+
+        raw_results = response.get("history_results")
+        raw_indices = response.get("matched_indices")
+        raw_count = response.get("matched_count")
+        if not isinstance(raw_results, list):
+            return None
+        if raw_indices is not None and not isinstance(raw_indices, list):
+            return None
+
+        parsed_results: list[MatchResult] = []
+        for item in raw_results:
+            parsed = match_result_from_payload(item)
+            if parsed is None:
+                return None
+            parsed_results.append(parsed)
+
+        parsed_indices: Optional[list[int]] = None
+        if isinstance(raw_indices, list):
+            parsed_indices = []
+            for idx in raw_indices:
+                if not isinstance(idx, int):
+                    return None
+                parsed_indices.append(idx)
+
+        matched_count = raw_count if isinstance(raw_count, int) else (
+            len(parsed_indices) if parsed_indices is not None else 0
+        )
+        if self.debug:
+            indices_state = "included" if parsed_indices is not None else "omitted"
+            daemon_debug_log(
+                True,
+                f"query={query!r} matched_count={matched_count} matched_indices={indices_state}",
+            )
+        return parsed_results, parsed_indices, matched_count
+
+
+def daemon_read_request(conn: socket.socket) -> Optional[dict[str, Any]]:
+    chunks: list[bytes] = []
+    total = 0
+    limit = 64 * 1024 * 1024
+    while True:
+        try:
+            chunk = conn.recv(65536)
+        except OSError:
+            return None
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+        if total > limit:
+            return None
+        if b"\n" in chunk:
+            break
+    raw = b"".join(chunks)
+    if not raw:
+        return None
+    line = raw.split(b"\n", 1)[0].strip()
+    if not line:
+        return None
+    try:
+        payload = json.loads(line.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def daemon_write_response(conn: socket.socket, payload: dict[str, Any]) -> None:
+    try:
+        conn.sendall((json.dumps(payload, separators=(",", ":")) + "\n").encode("utf-8"))
+    except OSError:
+        return
+
+
+def run_history_daemon(history_path: Path, socket_path: Path, *, debug: bool = False) -> int:
+    history = load_history(history_path)
+    signature = history_file_signature(history_path)
+
+    try:
+        socket_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        print(f"zsh_flex_history daemon: failed to create socket directory: {exc}", file=sys.stderr)
+        return 1
+
+    if socket_path.exists():
+        ping = daemon_send_request(socket_path, {"action": "ping"}, timeout=0.15)
+        if isinstance(ping, dict) and ping.get("ok") is True:
+            daemon_debug_log(debug, f"daemon already running at {socket_path}, exiting")
+            return 0
+        try:
+            socket_path.unlink()
+            daemon_debug_log(debug, f"removed stale socket at {socket_path}")
+        except OSError:
+            pass
+
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+        try:
+            try:
+                server.bind(str(socket_path))
+                os.chmod(socket_path, 0o600)
+                server.listen(16)
+                daemon_debug_log(debug, f"daemon listening on {socket_path} (history={history_path})")
+            except OSError as exc:
+                print(f"zsh_flex_history daemon: failed to bind socket: {exc}", file=sys.stderr)
+                return 1
+
+            while True:
+                try:
+                    conn, _ = server.accept()
+                except OSError:
+                    continue
+                with conn:
+                    request = daemon_read_request(conn)
+                    if request is None:
+                        daemon_write_response(conn, {"ok": False, "error": "invalid request"})
+                        continue
+
+                    new_signature = history_file_signature(history_path)
+                    if new_signature != signature:
+                        history = load_history(history_path)
+                        signature = new_signature
+
+                    action = request.get("action")
+                    if action == "ping":
+                        daemon_write_response(conn, {"ok": True})
+                        continue
+
+                    if action != "search_history":
+                        daemon_write_response(conn, {"ok": False, "error": "unknown action"})
+                        continue
+
+                    raw_query = request.get("query", "")
+                    query = raw_query if isinstance(raw_query, str) else str(raw_query)
+                    raw_candidates = request.get("candidate_indices")
+                    candidate_indices: Optional[list[int]] = None
+                    if isinstance(raw_candidates, list):
+                        parsed_candidates: list[int] = []
+                        max_idx = len(history) - 1
+                        for item in raw_candidates:
+                            if isinstance(item, int) and 0 <= item <= max_idx:
+                                parsed_candidates.append(item)
+                        candidate_indices = parsed_candidates
+                    raw_limit = request.get("limit")
+                    limit = raw_limit if isinstance(raw_limit, int) else None
+
+                    history_results, matched_indices = search_history_only(
+                        query,
+                        history,
+                        candidate_indices=candidate_indices,
+                        limit=limit,
+                    )
+                    matched_count = len(matched_indices)
+                    # Avoid sending a huge full-history index list for the
+                    # empty query on startup; for any non-empty query, return
+                    # full indices to preserve incremental narrowing behavior.
+                    indices_payload: Optional[list[int]] = None
+                    if query != "":
+                        indices_payload = matched_indices
+                    daemon_write_response(
+                        conn,
+                        {
+                            "ok": True,
+                            "history_results": [match_result_to_payload(item) for item in history_results],
+                            "matched_indices": indices_payload,
+                            "matched_indices_omitted": indices_payload is None,
+                            "matched_count": matched_count,
+                        },
+                    )
+        finally:
+            try:
+                socket_path.unlink()
+            except OSError:
+                pass
 
 
 def truncate_text(text: str, width: int) -> str:
@@ -764,6 +1177,8 @@ def draw_panel(
     panel_rows: int,
     width: int,
     status_message: str = "",
+    debug_note: str = "",
+    total_count: Optional[int] = None,
 ) -> tuple[int, int]:
     anchor_col = max(1, anchor_col)
     render_width = max(1, width - anchor_col + 1)
@@ -782,8 +1197,14 @@ def draw_panel(
             query_parts.append(f"{REVERSE}{ch}{RESET}")
         else:
             query_parts.append(ch)
-    lines.append("".join(query_parts))
+    query_line = "".join(query_parts)
+    if debug_note:
+        note = f" {muted}{debug_note}{RESET}"
+        room = max(0, render_width - len(query_view))
+        query_line += note[:room]
+    lines.append(query_line)
 
+    effective_total = max(len(results), total_count or 0)
     for i in range(visible):
         idx = offset + i
         if idx >= len(results):
@@ -792,7 +1213,7 @@ def draw_panel(
             else:
                 lines.append("")
             continue
-        remaining = max(0, len(results) - (offset + visible))
+        remaining = max(0, effective_total - (offset + visible))
         is_last_visible_row = i == (visible - 1)
         more_text = f"{remaining} more" if (is_last_visible_row and remaining > 0) else ""
         suffix = f"    {muted}{more_text}{RESET}" if more_text else ""
@@ -1026,6 +1447,7 @@ def run(
     *,
     inline_with_prompt: bool = False,
     history_updates: Optional[queue.Queue[tuple[str, object]]] = None,
+    history_client: Optional[HistoryDaemonClient] = None,
 ) -> Optional[str]:
     global TERM_OUT
     tty_in_file = None
@@ -1120,22 +1542,44 @@ def run(
             offset = 0
             chosen: Optional[str] = None
             query_start = 0
-            all_indices = list(range(len(history)))
+            all_indices: list[int] = []
+            initial_matched_indices: Optional[list[int]] = None
+            initial_matched_count: Optional[int] = None
+            if history_client is not None:
+                loaded = history_client.search_history("", limit=MAX_RETURNED_RESULTS)
+                if loaded is None:
+                    initial_results = []
+                    history_load_error = True
+                else:
+                    history_matches, initial_matched_indices, initial_matched_count = loaded
+                    initial_results = merge_runtime_and_rank(
+                        "",
+                        cursor_pos,
+                        history_matches,
+                        limit=MAX_RETURNED_RESULTS,
+                    )
+                    history_load_error = False
+            else:
+                all_indices = list(range(len(history)))
+                initial_results, _ = search(
+                    "",
+                    history,
+                    cursor_pos=cursor_pos,
+                    candidate_indices=all_indices,
+                    limit=MAX_RETURNED_RESULTS,
+                )
+                initial_matched_indices = all_indices
+                initial_matched_count = len(all_indices)
+                history_load_error = False
             last_query = ""
-            last_matched_indices = all_indices
-            initial_results, _ = search(
-                "",
-                history,
-                cursor_pos=cursor_pos,
-                candidate_indices=all_indices,
-            )
-            match_cache: dict[tuple[str, int], tuple[list[int], list[MatchResult]]] = {
-                ("", cursor_pos): (all_indices, initial_results)
+            last_matched_indices = initial_matched_indices
+            initial_total_count = max(len(initial_results), initial_matched_count or 0)
+            match_cache: dict[tuple[str, int], tuple[Optional[list[int]], list[MatchResult], Optional[int], int]] = {
+                ("", cursor_pos): (initial_matched_indices, initial_results, initial_matched_count, initial_total_count)
             }
             cache_order: list[tuple[str, int]] = [("", cursor_pos)]
             cache_limit = 128
-            history_loading = history_updates is not None
-            history_load_error = False
+            history_loading = history_updates is not None and history_client is None
             mouse_selecting = False
             mouse_enabled = False
             last_left_click_time = 0.0
@@ -1197,8 +1641,10 @@ def run(
     
                     def cache_put(
                         key: tuple[str, int],
-                        indices: list[int],
+                        indices: Optional[list[int]],
                         cached_results: list[MatchResult],
+                        matched_count: Optional[int],
+                        total_count: int,
                     ) -> None:
                         if key in match_cache:
                             return
@@ -1206,9 +1652,9 @@ def run(
                             oldest = cache_order.pop(0)
                             match_cache.pop(oldest, None)
                         cache_order.append(key)
-                        match_cache[key] = (indices, cached_results)
+                        match_cache[key] = (indices, cached_results, matched_count, total_count)
     
-                    if history_updates is not None:
+                    if history_updates is not None and history_client is None:
                         while True:
                             try:
                                 kind, payload = history_updates.get_nowait()
@@ -1226,8 +1672,10 @@ def run(
                                         history,
                                         cursor_pos=cursor_pos,
                                         candidate_indices=all_indices,
+                                        limit=MAX_RETURNED_RESULTS,
                                     )
-                                    match_cache = {("", cursor_pos): (all_indices, initial_results)}
+                                    initial_total_count = max(len(initial_results), len(all_indices))
+                                    match_cache = {("", cursor_pos): (all_indices, initial_results, len(all_indices), initial_total_count)}
                                     cache_order = [("", cursor_pos)]
                                 history_loading = False
                             elif kind == "error":
@@ -1238,21 +1686,53 @@ def run(
                     visible = max(1, panel_rows - 1)
                     cache_key = (query, cursor_pos)
                     if cache_key in match_cache:
-                        matched_indices, results = match_cache[cache_key]
+                        matched_indices, results, matched_count, total_count = match_cache[cache_key]
                     else:
-                        candidate_indices = all_indices
-                        if query.startswith(last_query):
-                            candidate_indices = last_matched_indices
-                        results, matched_indices = search(
-                            query,
-                            history,
-                            cursor_pos=cursor_pos,
-                            candidate_indices=candidate_indices,
-                        )
-                        cache_put(cache_key, matched_indices, results)
+                        if history_client is not None:
+                            candidate_indices: Optional[list[int]] = None
+                            if query.startswith(last_query) and last_matched_indices is not None:
+                                candidate_indices = last_matched_indices
+                            remote = history_client.search_history(
+                                query,
+                                candidate_indices=candidate_indices,
+                                limit=MAX_RETURNED_RESULTS,
+                            )
+                            if remote is None:
+                                history_results = []
+                                matched_indices = None
+                                matched_count = None
+                                history_load_error = True
+                            else:
+                                history_results, matched_indices, matched_count = remote
+                                history_load_error = False
+                            results = merge_runtime_and_rank(
+                                query,
+                                cursor_pos,
+                                history_results,
+                                limit=MAX_RETURNED_RESULTS,
+                            )
+                        else:
+                            candidate_indices = all_indices
+                            if query.startswith(last_query) and last_matched_indices is not None:
+                                candidate_indices = last_matched_indices
+                            results, matched_indices = search(
+                                query,
+                                history,
+                                cursor_pos=cursor_pos,
+                                candidate_indices=candidate_indices,
+                                limit=MAX_RETURNED_RESULTS,
+                            )
+                            matched_count = len(matched_indices) if matched_indices is not None else None
+                        total_count = max(len(results), matched_count or 0)
+                        cache_put(cache_key, matched_indices, results, matched_count, total_count)
                     last_query = query
                     last_matched_indices = matched_indices
                     status_message = ""
+                    debug_note = ""
+                    if history_client is not None and history_client.debug:
+                        count_text = "?" if matched_count is None else str(matched_count)
+                        indices_text = "no-idx" if matched_indices is None else "idx"
+                        debug_note = f"matches={count_text} {indices_text}"
                     if history_loading and not results:
                         status_message = "loading history..."
                     elif history_load_error and not results:
@@ -1277,6 +1757,8 @@ def run(
                         panel_rows,
                         width,
                         status_message=status_message,
+                        debug_note=debug_note,
+                        total_count=total_count,
                     )
     
                     ev, payload = read_key(fd)
@@ -1540,11 +2022,53 @@ def main() -> int:
         action="store_true",
         help="Print selected command to stdout instead of executing it.",
     )
+    parser.add_argument("--daemon", action="store_true", help=SUPPRESS)
+    parser.add_argument("--socket-path", default="", help=SUPPRESS)
+    parser.add_argument("--history-file", default="", help=SUPPRESS)
+    parser.add_argument(
+        "--no-shared-daemon",
+        action="store_true",
+        help="Error out because local fallback mode is disabled.",
+    )
+    parser.add_argument(
+        "--debug-daemon",
+        action="store_true",
+        help="Print daemon connection/startup diagnostics to stderr.",
+    )
     args = parser.parse_args()
 
-    history_path = Path(os.environ.get("HISTFILE", str(Path.home() / ".zsh_history"))).expanduser()
-    history_updates = spawn_history_loader(history_path)
-    selected = run([], inline_with_prompt=args.print_only, history_updates=history_updates)
+    history_path_value = args.history_file or os.environ.get("HISTFILE", str(Path.home() / ".zsh_history"))
+    history_path = Path(history_path_value).expanduser()
+    socket_path = Path(args.socket_path).expanduser() if args.socket_path else default_daemon_socket_path()
+
+    if args.daemon:
+        return run_history_daemon(history_path, socket_path, debug=args.debug_daemon)
+
+    history_client: Optional[HistoryDaemonClient] = None
+    history_updates: Optional[queue.Queue[tuple[str, object]]] = None
+    if not args.no_shared_daemon:
+        daemon_client = HistoryDaemonClient(
+            socket_path,
+            history_path,
+            Path(__file__).resolve(),
+            debug=args.debug_daemon,
+        )
+        if daemon_client.ensure_running():
+            history_client = daemon_client
+            daemon_debug_log(args.debug_daemon, "shared daemon mode enabled")
+        else:
+            print("zsh_flex_history: daemon unavailable (no local fallback enabled)", file=sys.stderr)
+            return 1
+    else:
+        print("zsh_flex_history: --no-shared-daemon is not supported (no local fallback enabled)", file=sys.stderr)
+        return 1
+
+    selected = run(
+        [],
+        inline_with_prompt=args.print_only,
+        history_updates=history_updates,
+        history_client=history_client,
+    )
     if selected:
         selected = normalize_shell_command(selected)
         if not selected:
