@@ -1979,13 +1979,20 @@ def run(
                                     select_all_query()
                                     mouse_selecting = False
                                 elif left_click_count == 2 and query:
-                                    # Select a "word" delimited by whitespace.
+                                    # Select the contiguous run under the cursor:
+                                    # either non-whitespace ("word") or whitespace.
                                     left = click_pos
-                                    while left > 0 and not query[left - 1].isspace():
-                                        left -= 1
                                     right = click_pos
-                                    while right < len(query) and not query[right].isspace():
-                                        right += 1
+                                    if click_pos < len(query):
+                                        select_whitespace = query[click_pos].isspace()
+                                        while left > 0 and query[left - 1].isspace() == select_whitespace:
+                                            left -= 1
+                                        right = click_pos + 1
+                                        while right < len(query) and query[right].isspace() == select_whitespace:
+                                            right += 1
+                                    else:
+                                        while left > 0 and not query[left - 1].isspace():
+                                            left -= 1
                                     if left != right:
                                         sel_anchor = left
                                         sel_end = right
