@@ -79,7 +79,7 @@ def style(*, fg: Optional[int] = None, bold: bool = False, underline: bool = Fal
 
 
 RESET = "\x1b[0m"
-REVERSE = "\x1b[7m"
+QUERY_SELECTION_BG = "\x1b[103m"
 CLEAR_LINE = "\x1b[2K"
 CLEAR_TO_END = "\x1b[K"
 HIDE_CURSOR = "\x1b[?25l"
@@ -1194,7 +1194,7 @@ def draw_panel(
     for i, ch in enumerate(query_view):
         qidx = query_start + i
         if sel and sel[0] <= qidx < sel[1]:
-            query_parts.append(f"{REVERSE}{ch}{RESET}")
+            query_parts.append(f"{QUERY_SELECTION_BG}{ch}{RESET}")
         else:
             query_parts.append(ch)
     query_line = "".join(query_parts)
