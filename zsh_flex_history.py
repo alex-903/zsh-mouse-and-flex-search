@@ -23,6 +23,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, List, Optional
 
+from zsh_syntax_highlighting import ansi_for_token, highlight_tokens
+
 
 BASE16_TO_ANSI = {
     "base00": 0,
@@ -1205,18 +1207,35 @@ def draw_panel(
     query_width = render_width
     query_start, query_view = query_window(query, cursor_pos, query_width)
     sel = selection_bounds(sel_anchor, sel_end)
-    query_parts: list[str] = []
+    syntax_tokens = highlight_tokens(query)
+    query_parts: list[str] = [RESET]
+    active_query_style = ""
     for i, ch in enumerate(query_view):
         qidx = query_start + i
+        token = syntax_tokens[qidx] if qidx < len(syntax_tokens) else "default"
+        token_style = ansi_for_token(token)
         if sel and sel[0] <= qidx < sel[1]:
-            query_parts.append(f"{QUERY_SELECTION_BG}{ch}{RESET}")
-        else:
-            query_parts.append(ch)
+            if active_query_style:
+                query_parts.append(RESET)
+                active_query_style = ""
+            if token_style:
+                query_parts.append(f"{QUERY_SELECTION_BG}{token_style}{ch}{RESET}")
+            else:
+                query_parts.append(f"{QUERY_SELECTION_BG}{ch}{RESET}")
+            continue
+        if token_style != active_query_style:
+            query_parts.append(token_style if token_style else RESET)
+            active_query_style = token_style
+        query_parts.append(ch)
+    if active_query_style:
+        query_parts.append(RESET)
     query_line = "".join(query_parts)
     if debug_note:
-        note = f" {muted}{debug_note}{RESET}"
         room = max(0, render_width - len(query_view))
-        query_line += note[:room]
+        if room > 0:
+            note_text = debug_note[: max(0, room - 1)]
+            if note_text:
+                query_line += f" {muted}{note_text}{RESET}"
     lines.append(query_line)
 
     effective_total = max(len(results), total_count or 0)
