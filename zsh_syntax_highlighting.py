@@ -394,7 +394,7 @@ def _command_state(word: str, word_complete: bool) -> str:
     # For in-progress typing, unknown non-prefix commands are likely errors.
     # Keep known prefixes neutral until command token is complete.
     if not word_complete:
-        if _is_known_command_prefix(word):
+        if _is_known_command_prefix(word) or _is_existing_path_prefix(word):
             return "pending"
         return "error"
 
@@ -426,6 +426,30 @@ def _is_known_command_prefix(prefix: str) -> bool:
         return True
     path_env = os.environ.get("PATH", "")
     return _path_has_prefix(path_env, prefix)
+
+
+def _is_existing_path_prefix(text: str) -> bool:
+    if not text:
+        return False
+    if "/" not in text and not text.startswith("~"):
+        return False
+
+    expanded = os.path.expanduser(text)
+    parent_part, sep, name_prefix = expanded.rpartition("/")
+    if sep:
+        base_dir = parent_part or "/"
+    else:
+        base_dir = "."
+        name_prefix = expanded
+
+    try:
+        with os.scandir(base_dir) as entries:
+            for entry in entries:
+                if entry.name.startswith(name_prefix):
+                    return True
+    except OSError:
+        return False
+    return False
 
 
 @lru_cache(maxsize=4096)
