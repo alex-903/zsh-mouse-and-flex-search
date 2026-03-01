@@ -219,7 +219,16 @@ def highlight_tokens(query: str) -> list[str]:
             i += 1
 
         word = query[start:i]
-        kind = _classify_word(word, expect_command)
+        word_complete = False
+        if i < len(query):
+            next_ch = query[i]
+            if next_ch.isspace():
+                word_complete = True
+            elif _match_operator(query, i) is not None:
+                word_complete = True
+            elif _is_comment_start(query, i):
+                word_complete = True
+        kind = _classify_word(word, expect_command, word_complete)
         _mark(tokens, start, i, kind)
 
         if kind == "assignment":
@@ -354,7 +363,7 @@ def _scan_arithmetic(text: str, start: int) -> int:
     return len(text)
 
 
-def _classify_word(word: str, expect_command: bool) -> str:
+def _classify_word(word: str, expect_command: bool, word_complete: bool) -> str:
     if not word:
         return "default"
     if word in KEYWORDS:
@@ -364,29 +373,26 @@ def _classify_word(word: str, expect_command: bool) -> str:
     if word.startswith("-") and len(word) > 1:
         return "option"
     if expect_command:
-        if _is_missing_command(word):
+        state = _command_state(word, word_complete)
+        if state == "valid":
+            return "command"
+        if state == "error":
             return "error"
-        return "command"
+        return "default"
     return "default"
 
 
-def _is_missing_command(word: str) -> bool:
+def _command_state(word: str, word_complete: bool) -> str:
     # Avoid false positives for ambiguous/incomplete shell forms while typing.
     if not word or AMBIGUOUS_COMMAND_RE.search(word):
-        return False
+        return "pending"
 
-    if word in KEYWORDS or word in BUILTINS:
-        return False
+    if _is_valid_command(word):
+        return "valid"
 
-    # Do not mark as error while the token is still a valid command prefix.
-    if _is_known_command_prefix(word):
-        return False
-
-    if "/" in word:
-        path = os.path.expanduser(word)
-        return not (os.path.isfile(path) and os.access(path, os.X_OK))
-
-    return not _which_cached(os.environ.get("PATH", ""), word)
+    if word_complete:
+        return "error"
+    return "pending"
 
 
 @lru_cache(maxsize=4096)
@@ -394,34 +400,11 @@ def _which_cached(path_env: str, word: str) -> str | None:
     return shutil.which(word, path=path_env)
 
 
-def _is_known_command_prefix(prefix: str) -> bool:
-    if not prefix:
-        return False
-    if any(k.startswith(prefix) for k in KEYWORDS):
+def _is_valid_command(word: str) -> bool:
+    if word in KEYWORDS or word in BUILTINS:
         return True
-    if any(b.startswith(prefix) for b in BUILTINS):
-        return True
-    path_env = os.environ.get("PATH", "")
-    return _path_has_prefix(path_env, prefix)
+    if "/" in word:
+        path = os.path.expanduser(word)
+        return os.path.isfile(path) and os.access(path, os.X_OK)
+    return _which_cached(os.environ.get("PATH", ""), word) is not None
 
-
-@lru_cache(maxsize=4096)
-def _path_has_prefix(path_env: str, prefix: str) -> bool:
-    if not prefix:
-        return False
-    for path_dir in path_env.split(os.pathsep):
-        if not path_dir:
-            continue
-        try:
-            with os.scandir(path_dir) as entries:
-                for entry in entries:
-                    if not entry.name.startswith(prefix):
-                        continue
-                    try:
-                        if entry.is_file() and os.access(entry.path, os.X_OK):
-                            return True
-                    except OSError:
-                        continue
-        except OSError:
-            continue
-    return False

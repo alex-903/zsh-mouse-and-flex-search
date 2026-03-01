@@ -1142,6 +1142,28 @@ def query_window(query: str, cursor_pos: int, available: int) -> tuple[int, str]
     return start, query[start : start + available]
 
 
+def wrapped_query_layout(
+    query: str,
+    cursor_pos: int,
+    render_width: int,
+    panel_rows: int,
+) -> tuple[int, int, int, int]:
+    render_width = max(1, render_width)
+    cursor_pos = max(0, min(cursor_pos, len(query)))
+    query_rows_limit = max(1, panel_rows - 1)
+    query_capacity = max(1, query_rows_limit * render_width)
+
+    max_start = max(0, len(query) - query_capacity)
+    cursor_line = cursor_pos // render_width
+    start_line = max(0, cursor_line - (query_rows_limit - 1))
+    query_start = min(start_line * render_width, max_start)
+    query_view_len = min(query_capacity, len(query) - query_start)
+    query_rows_used = max(1, (query_view_len + render_width - 1) // render_width)
+    query_rows_used = min(query_rows_used, query_rows_limit)
+    results_visible = max(0, panel_rows - query_rows_used)
+    return query_start, query_view_len, query_rows_used, results_visible
+
+
 def selection_bounds(sel_anchor: Optional[int], sel_end: Optional[int]) -> Optional[tuple[int, int]]:
     if sel_anchor is None or sel_end is None:
         return None
@@ -1196,50 +1218,57 @@ def draw_panel(
     status_message: str = "",
     debug_note: str = "",
     total_count: Optional[int] = None,
-) -> tuple[int, int]:
+) -> tuple[int, int, int, int]:
     anchor_col = max(1, anchor_col)
     render_width = max(1, width - anchor_col + 1)
-    visible = max(1, panel_rows - 1)
     muted = style(fg=base16_ansi("base03"))
 
     lines: list[str] = []
     cursor_pos = max(0, min(cursor_pos, len(query)))
-    query_width = render_width
-    query_start, query_view = query_window(query, cursor_pos, query_width)
+    query_start, query_view_len, query_rows_used, results_visible = wrapped_query_layout(
+        query,
+        cursor_pos,
+        render_width,
+        panel_rows,
+    )
+    query_view = query[query_start : query_start + query_view_len]
     sel = selection_bounds(sel_anchor, sel_end)
     syntax_tokens = highlight_tokens(query)
-    query_parts: list[str] = [RESET]
-    active_query_style = ""
-    for i, ch in enumerate(query_view):
-        qidx = query_start + i
-        token = syntax_tokens[qidx] if qidx < len(syntax_tokens) else "default"
-        token_style = ansi_for_token(token)
-        if sel and sel[0] <= qidx < sel[1]:
-            if active_query_style:
-                query_parts.append(RESET)
-                active_query_style = ""
-            if token_style:
-                query_parts.append(f"{QUERY_SELECTION_BG}{token_style}{ch}{RESET}")
-            else:
-                query_parts.append(f"{QUERY_SELECTION_BG}{ch}{RESET}")
-            continue
-        if token_style != active_query_style:
-            query_parts.append(token_style if token_style else RESET)
-            active_query_style = token_style
-        query_parts.append(ch)
-    if active_query_style:
-        query_parts.append(RESET)
-    query_line = "".join(query_parts)
-    if debug_note:
-        room = max(0, render_width - len(query_view))
-        if room > 0:
-            note_text = debug_note[: max(0, room - 1)]
-            if note_text:
-                query_line += f" {muted}{note_text}{RESET}"
-    lines.append(query_line)
+    for row in range(query_rows_used):
+        seg_start = row * render_width
+        seg_end = min(seg_start + render_width, query_view_len)
+        query_parts: list[str] = [RESET]
+        active_query_style = ""
+        for i, ch in enumerate(query_view[seg_start:seg_end]):
+            qidx = query_start + seg_start + i
+            token = syntax_tokens[qidx] if qidx < len(syntax_tokens) else "default"
+            token_style = ansi_for_token(token)
+            if sel and sel[0] <= qidx < sel[1]:
+                if active_query_style:
+                    query_parts.append(RESET)
+                    active_query_style = ""
+                if token_style:
+                    query_parts.append(f"{QUERY_SELECTION_BG}{token_style}{ch}{RESET}")
+                else:
+                    query_parts.append(f"{QUERY_SELECTION_BG}{ch}{RESET}")
+                continue
+            if token_style != active_query_style:
+                query_parts.append(token_style if token_style else RESET)
+                active_query_style = token_style
+            query_parts.append(ch)
+        if active_query_style:
+            query_parts.append(RESET)
+        query_line = "".join(query_parts)
+        if row == 0 and debug_note:
+            room = max(0, render_width - (seg_end - seg_start))
+            if room > 0:
+                note_text = debug_note[: max(0, room - 1)]
+                if note_text:
+                    query_line += f" {muted}{note_text}{RESET}"
+        lines.append(query_line)
 
     effective_total = max(len(results), total_count or 0)
-    for i in range(visible):
+    for i in range(results_visible):
         idx = offset + i
         if idx >= len(results):
             if i == 0 and status_message:
@@ -1247,8 +1276,8 @@ def draw_panel(
             else:
                 lines.append("")
             continue
-        remaining = max(0, effective_total - (offset + visible))
-        is_last_visible_row = i == (visible - 1)
+        remaining = max(0, effective_total - (offset + results_visible))
+        is_last_visible_row = i == (results_visible - 1)
         more_text = f"{remaining} more" if (is_last_visible_row and remaining > 0) else ""
         suffix = f"    {muted}{more_text}{RESET}" if more_text else ""
         result_width = max(0, render_width - len(more_text) - (4 if more_text else 0))
@@ -1264,15 +1293,14 @@ def draw_panel(
         term_write(move_to(anchor_row + i, anchor_col) + CLEAR_TO_END + line)
 
     # Put cursor on query input field.
-    cursor_in_view = max(0, min(len(query_view), cursor_pos - query_start))
-    query_col = anchor_col + cursor_in_view
-    if query_width > 0:
-        query_col = min(query_col, anchor_col + query_width - 1)
-    else:
-        query_col = anchor_col
-    term_write(move_to(anchor_row, query_col))
+    cursor_in_view = max(0, cursor_pos - query_start)
+    max_cursor_slot = max(0, query_rows_used * render_width - 1)
+    cursor_in_view = min(cursor_in_view, max_cursor_slot)
+    cursor_row = min(query_rows_used - 1, cursor_in_view // render_width)
+    cursor_col = cursor_in_view % render_width
+    term_write(move_to(anchor_row + cursor_row, anchor_col + cursor_col))
     term_flush()
-    return query_start, len(query_view)
+    return query_start, query_view_len, query_rows_used, results_visible
 
 
 def read_key(fd: int) -> tuple[str, object]:
@@ -1517,14 +1545,14 @@ def run(
     if fd is None:
         print("zsh_flex_history: no usable TTY available for interactive mode", file=sys.stderr)
         return None
-    panel_rows = 4
+    min_result_rows = 3
+    min_panel_rows = 1 + min_result_rows
 
     try:
         with RawTerminal(fd) as rt:
             term_size = tty_terminal_size(fd)
             term_lines = term_size.lines
             pos = query_cursor_position(fd)
-            desired_rows = max(1, min(panel_rows, term_lines))
             if pos is None:
                 start_row = max(1, term_lines - 1)
                 start_col = 1
@@ -1538,9 +1566,9 @@ def run(
             # If there is no room to draw result rows below the prompt area,
             # reserve lines by scrolling a small amount.
             if inline_with_prompt:
-                required_below = max(0, desired_rows - 1)
+                required_below = max(0, min_panel_rows - 1)
             else:
-                required_below = desired_rows
+                required_below = min_panel_rows
             scroll_rows = max(0, required_below - space_below)
             if scroll_rows > 0:
                 term_write(move_to(term_lines, 1) + ("\n" * scroll_rows))
@@ -1554,15 +1582,15 @@ def run(
             if inline_with_prompt:
                 anchor_row = max(1, start_row)
                 anchor_col = max(1, start_col)
-                panel_rows = max(1, min(desired_rows, term_lines - anchor_row + 1))
-            elif space_below >= 2:
+                panel_rows = max(1, term_lines - anchor_row + 1)
+            elif space_below >= 1:
                 anchor_row = start_row + 1
                 anchor_col = 1
-                panel_rows = max(1, min(desired_rows, space_below))
+                panel_rows = max(1, space_below)
             else:
                 anchor_row = max(1, start_row)
                 anchor_col = 1
-                panel_rows = max(1, min(desired_rows, term_lines - anchor_row + 1))
+                panel_rows = max(1, term_lines - anchor_row + 1)
             for row in range(anchor_row, anchor_row + panel_rows):
                 term_write(move_to(row, anchor_col) + CLEAR_TO_END)
             term_write(move_to(anchor_row, anchor_col))
@@ -1576,6 +1604,9 @@ def run(
             offset = 0
             chosen: Optional[str] = None
             query_start = 0
+            query_rows_used = 1
+            results_visible = max(1, panel_rows - 1)
+            render_width = 1
             all_indices: list[int] = []
             initial_matched_indices: Optional[list[int]] = None
             initial_matched_count: Optional[int] = None
@@ -1620,10 +1651,11 @@ def run(
             last_left_click_row = -1
             last_left_click_col = -1
             left_click_count = 0
+            last_drawn_panel_rows = panel_rows
 
             def clear_panel_and_restore_cursor() -> None:
                 # Clear panel content so repeated invocations always start clean.
-                for row in range(anchor_row, anchor_row + panel_rows):
+                for row in range(anchor_row, anchor_row + max(panel_rows, last_drawn_panel_rows)):
                     term_write(move_to(row, anchor_col) + CLEAR_TO_END)
                 # Restore cursor to the exact prompt position captured at invocation start.
                 term_write(move_to(start_row, start_col))
@@ -1716,8 +1748,32 @@ def run(
                                 history_loading = False
                                 history_load_error = True
     
-                    width = tty_terminal_size(fd).columns
-                    visible = max(1, panel_rows - 1)
+                    term_size = tty_terminal_size(fd)
+                    width = term_size.columns
+                    term_lines = term_size.lines
+                    render_width = max(1, width - max(1, anchor_col) + 1)
+                    required_query_rows = max(1, (len(query) + render_width - 1) // render_width)
+                    desired_panel_rows = max(min_panel_rows, required_query_rows + min_result_rows)
+                    max_panel_rows = max(1, term_lines - anchor_row + 1)
+                    if desired_panel_rows > max_panel_rows and anchor_row > 1:
+                        extra_rows = min(desired_panel_rows - max_panel_rows, anchor_row - 1)
+                        if extra_rows > 0:
+                            term_write(move_to(term_lines, 1) + ("\n" * extra_rows))
+                            term_flush()
+                            start_row = max(1, start_row - extra_rows)
+                            anchor_row = max(1, anchor_row - extra_rows)
+                            max_panel_rows = max(1, term_lines - anchor_row + 1)
+                    panel_rows = min(desired_panel_rows, max_panel_rows)
+                    if max_panel_rows >= min_panel_rows:
+                        panel_rows = max(min_panel_rows, panel_rows)
+
+                    _qs, _qvl, _qru, layout_results_visible = wrapped_query_layout(
+                        query,
+                        cursor_pos,
+                        render_width,
+                        panel_rows,
+                    )
+                    visible = max(1, layout_results_visible)
                     cache_key = (query, cursor_pos)
                     if cache_key in match_cache:
                         matched_indices, results, matched_count, total_count = match_cache[cache_key]
@@ -1771,6 +1827,9 @@ def run(
                         status_message = "loading history..."
                     elif history_load_error and not results:
                         status_message = "history load failed"
+                    if panel_rows < last_drawn_panel_rows:
+                        for row in range(anchor_row + panel_rows, anchor_row + last_drawn_panel_rows):
+                            term_write(move_to(row, anchor_col) + CLEAR_TO_END)
                     if selected >= len(results):
                         selected = max(0, len(results) - 1)
                     if selected < offset:
@@ -1778,7 +1837,7 @@ def run(
                     if selected >= offset + visible:
                         offset = selected - visible + 1
     
-                    query_start, _query_view_len = draw_panel(
+                    query_start, _query_view_len, query_rows_used, results_visible = draw_panel(
                         anchor_row,
                         anchor_col,
                         query,
@@ -1794,6 +1853,7 @@ def run(
                         debug_note=debug_note,
                         total_count=total_count,
                     )
+                    last_drawn_panel_rows = panel_rows
     
                     ev, payload = read_key(fd)
     
@@ -1983,10 +2043,11 @@ def run(
                         if action != "M":
                             continue
     
-                        # Query line interactions.
-                        if my == anchor_row:
-                            click_col = max(anchor_col, mx)
-                            click_pos = query_start + max(0, click_col - anchor_col)
+                        # Query line interactions (including wrapped rows).
+                        if anchor_row <= my < (anchor_row + query_rows_used):
+                            click_row = my - anchor_row
+                            click_col = max(0, max(anchor_col, mx) - anchor_col)
+                            click_pos = query_start + (click_row * render_width) + click_col
                             click_pos = max(0, min(click_pos, len(query)))
     
                             if is_motion:
@@ -2040,7 +2101,7 @@ def run(
     
                         # Ignore result-line clicks; selection/accept remains
                         # keyboard-driven (arrows + Enter/Tab).
-                        if my >= anchor_row + 1 and my < anchor_row + panel_rows and not is_motion and button == 0:
+                        if my >= (anchor_row + query_rows_used) and my < anchor_row + panel_rows and not is_motion and button == 0:
                             continue
             except KeyboardInterrupt:
                 clear_panel_and_restore_cursor()
