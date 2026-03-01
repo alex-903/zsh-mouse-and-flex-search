@@ -1180,16 +1180,24 @@ def render_result_line(item: MatchResult, selected: bool, width: int, *, unselec
     text = truncate_text(item.text, body_width)
     pos_set = set(item.positions)
 
-    sel_fg = base16_ansi("base0E")
-    match_fg = base16_ansi("base0D")
+    match_fg = base16_ansi("base03")
 
     if selected:
-        normal_style = style(fg=sel_fg, bold=True, underline=True)
+        # Explicit reset before selected non-match style prevents underline
+        # from leaking from previously underlined match segments.
+        normal_style = RESET + style(bold=True)
     elif unselected_white:
         normal_style = ""
     else:
         normal_style = ""
-    match_style = style(fg=match_fg, bold=True, underline=selected)
+    # Match characters are grey by default; selected match chars are
+    # both bold and underlined.
+    if selected:
+        # Keep selected matches on default foreground so underline is clear,
+        # while the whole selected row remains bold.
+        match_style = RESET + style(bold=True, underline=True)
+    else:
+        match_style = style(fg=match_fg, underline=True)
 
     out: list[str] = []
     active_style = ""

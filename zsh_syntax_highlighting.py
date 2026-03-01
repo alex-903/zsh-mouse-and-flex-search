@@ -16,9 +16,9 @@ ANSI_STYLE_BY_TOKEN = {
     "option": "\x1b[36m",       # cyan
     "string": "\x1b[33m",       # yellow
     "variable": "\x1b[35m",     # magenta
-    "operator": "\x1b[31m",     # red
+    "operator": "",             # default
     "comment": "\x1b[90m",      # bright black
-    "assignment": "\x1b[35m",   # magenta
+    "assignment": "",           # default
     "error": "\x1b[1;31m",      # bold red
 }
 
@@ -391,6 +391,13 @@ def _command_state(word: str, word_complete: bool) -> str:
     if _is_valid_command(word):
         return "valid"
 
+    # For in-progress typing, unknown non-prefix commands are likely errors.
+    # Keep known prefixes neutral until command token is complete.
+    if not word_complete:
+        if _is_known_command_prefix(word):
+            return "pending"
+        return "error"
+
     if word_complete:
         return "error"
     return "pending"
@@ -408,3 +415,36 @@ def _is_valid_command(word: str) -> bool:
         path = os.path.expanduser(word)
         return os.path.isfile(path) and os.access(path, os.X_OK)
     return _which_cached(os.environ.get("PATH", ""), word) is not None
+
+
+def _is_known_command_prefix(prefix: str) -> bool:
+    if not prefix:
+        return False
+    if any(k.startswith(prefix) for k in KEYWORDS):
+        return True
+    if any(b.startswith(prefix) for b in BUILTINS):
+        return True
+    path_env = os.environ.get("PATH", "")
+    return _path_has_prefix(path_env, prefix)
+
+
+@lru_cache(maxsize=4096)
+def _path_has_prefix(path_env: str, prefix: str) -> bool:
+    if not prefix:
+        return False
+    for path_dir in path_env.split(os.pathsep):
+        if not path_dir:
+            continue
+        try:
+            with os.scandir(path_dir) as entries:
+                for entry in entries:
+                    if not entry.name.startswith(prefix):
+                        continue
+                    try:
+                        if entry.is_file() and os.access(entry.path, os.X_OK):
+                            return True
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return False
