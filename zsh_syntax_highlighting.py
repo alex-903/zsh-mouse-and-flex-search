@@ -79,7 +79,7 @@ OPERATORS = tuple(
 )
 
 
-COMMAND_SEPARATORS = {"&&", "||", "|", ";", "&", "(", ")", "{", "}"}
+COMMAND_SEPARATORS = {"&&", "||", "|", ";", "&", "(", ")"}
 ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 AMBIGUOUS_COMMAND_RE = re.compile(r"[\\$*?[\]{}()'\"`=]")
 
@@ -234,7 +234,8 @@ def highlight_tokens(query: str) -> list[str]:
         if kind == "assignment":
             expect_command = True
         elif kind == "keyword":
-            expect_command = word in {"then", "do", "else", "elif", "in", "time"}
+            # `in` (for/case lists) expects patterns/words, not a command.
+            expect_command = word in {"then", "do", "else", "elif", "time"}
         else:
             expect_command = False
 
@@ -407,4 +408,3 @@ def _is_valid_command(word: str) -> bool:
         path = os.path.expanduser(word)
         return os.path.isfile(path) and os.access(path, os.X_OK)
     return _which_cached(os.environ.get("PATH", ""), word) is not None
-
