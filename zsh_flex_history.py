@@ -137,8 +137,19 @@ def read_clipboard() -> str:
         proc = subprocess.run(["pbpaste"], check=True, capture_output=True, text=True)
     except (OSError, subprocess.SubprocessError):
         return ""
-    text = proc.stdout.replace("\r\n", "\n").replace("\r", "\n")
-    return text.replace("\n", " ")
+    return proc.stdout.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def normalize_pasted_text(text: str) -> str:
+    # Keep multiline content, but strip terminal control artifacts.
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n").replace("\x00", "")
+    # Drop CSI sequences (including stray bracketed-paste/mouse reports).
+    normalized = re.sub(r"\x1b\[[0-9;?<>]*[ -/]*[@-~]", "", normalized)
+    # Drop leaked bracketed-paste markers even if ESC got stripped.
+    normalized = normalized.replace("200~", "").replace("201~", "")
+    # Drop leaked SGR mouse payloads when ESC is missing.
+    normalized = re.sub(r"<\d+;\d+;\d+[mM]", "", normalized)
+    return normalized
 
 
 def normalize_shell_command(text: str) -> str:
@@ -1142,6 +1153,66 @@ def query_window(query: str, cursor_pos: int, available: int) -> tuple[int, str]
     return start, query[start : start + available]
 
 
+@dataclass
+class QueryVisualRow:
+    start: int
+    end: int
+    text: str
+
+
+def build_query_visual_rows(query: str, render_width: int) -> list[QueryVisualRow]:
+    width = max(1, render_width)
+    rows: list[QueryVisualRow] = []
+    start = 0
+    buf: list[str] = []
+    i = 0
+    while i < len(query):
+        ch = query[i]
+        if ch == "\n":
+            rows.append(QueryVisualRow(start=start, end=i, text="".join(buf)))
+            i += 1
+            start = i
+            buf = []
+            continue
+        buf.append(ch)
+        i += 1
+        if len(buf) >= width:
+            rows.append(QueryVisualRow(start=start, end=i, text="".join(buf)))
+            start = i
+            buf = []
+    rows.append(QueryVisualRow(start=start, end=len(query), text="".join(buf)))
+    return rows
+
+
+def query_cursor_visual_position(rows: list[QueryVisualRow], cursor_pos: int) -> tuple[int, int]:
+    if not rows:
+        return 0, 0
+    for rindex, row in enumerate(rows):
+        if cursor_pos <= row.end:
+            col = max(0, min(cursor_pos - row.start, len(row.text)))
+            return rindex, col
+    last = rows[-1]
+    return len(rows) - 1, len(last.text)
+
+
+def query_pos_from_visual(
+    query: str,
+    render_width: int,
+    row_start: int,
+    click_row: int,
+    click_col: int,
+) -> int:
+    rows = build_query_visual_rows(query, render_width)
+    if not rows:
+        return 0
+    row_index = max(0, min(row_start + click_row, len(rows) - 1))
+    row = rows[row_index]
+    col = max(0, click_col)
+    if col >= len(row.text):
+        return row.end
+    return row.start + col
+
+
 def wrapped_query_layout(
     query: str,
     cursor_pos: int,
@@ -1151,15 +1222,11 @@ def wrapped_query_layout(
     render_width = max(1, render_width)
     cursor_pos = max(0, min(cursor_pos, len(query)))
     query_rows_limit = max(1, panel_rows - 1)
-    query_capacity = max(1, query_rows_limit * render_width)
-
-    max_start = max(0, len(query) - query_capacity)
-    cursor_line = cursor_pos // render_width
-    start_line = max(0, cursor_line - (query_rows_limit - 1))
-    query_start = min(start_line * render_width, max_start)
-    query_view_len = min(query_capacity, len(query) - query_start)
-    query_rows_used = max(1, (query_view_len + render_width - 1) // render_width)
-    query_rows_used = min(query_rows_used, query_rows_limit)
+    rows = build_query_visual_rows(query, render_width)
+    cursor_row, _cursor_col = query_cursor_visual_position(rows, cursor_pos)
+    query_start = max(0, cursor_row - (query_rows_limit - 1))
+    query_rows_used = min(query_rows_limit, max(1, len(rows) - query_start))
+    query_view_len = 0
     results_visible = max(0, panel_rows - query_rows_used)
     return query_start, query_view_len, query_rows_used, results_visible
 
@@ -1239,16 +1306,16 @@ def draw_panel(
         render_width,
         panel_rows,
     )
-    query_view = query[query_start : query_start + query_view_len]
+    query_rows = build_query_visual_rows(query, render_width)
+    visible_query_rows = query_rows[query_start : query_start + query_rows_used]
     sel = selection_bounds(sel_anchor, sel_end)
     syntax_tokens = highlight_tokens(query)
-    for row in range(query_rows_used):
-        seg_start = row * render_width
-        seg_end = min(seg_start + render_width, query_view_len)
+    for row, vrow in enumerate(visible_query_rows):
+        seg_len = len(vrow.text)
         query_parts: list[str] = [RESET]
         active_query_style = ""
-        for i, ch in enumerate(query_view[seg_start:seg_end]):
-            qidx = query_start + seg_start + i
+        for i, ch in enumerate(vrow.text):
+            qidx = vrow.start + i
             token = syntax_tokens[qidx] if qidx < len(syntax_tokens) else "default"
             token_style = ansi_for_token(token)
             if sel and sel[0] <= qidx < sel[1]:
@@ -1268,7 +1335,7 @@ def draw_panel(
             query_parts.append(RESET)
         query_line = "".join(query_parts)
         if row == 0 and debug_note:
-            room = max(0, render_width - (seg_end - seg_start))
+            room = max(0, render_width - seg_len)
             if room > 0:
                 note_text = debug_note[: max(0, room - 1)]
                 if note_text:
@@ -1301,11 +1368,9 @@ def draw_panel(
         term_write(move_to(anchor_row + i, anchor_col) + CLEAR_TO_END + line)
 
     # Put cursor on query input field.
-    cursor_in_view = max(0, cursor_pos - query_start)
-    max_cursor_slot = max(0, query_rows_used * render_width - 1)
-    cursor_in_view = min(cursor_in_view, max_cursor_slot)
-    cursor_row = min(query_rows_used - 1, cursor_in_view // render_width)
-    cursor_col = cursor_in_view % render_width
+    cursor_row_abs, cursor_col = query_cursor_visual_position(query_rows, cursor_pos)
+    cursor_row = min(query_rows_used - 1, max(0, cursor_row_abs - query_start))
+    cursor_col = max(0, min(cursor_col, render_width - 1))
     term_write(move_to(anchor_row + cursor_row, anchor_col + cursor_col))
     term_flush()
     return query_start, query_view_len, query_rows_used, results_visible
@@ -1313,8 +1378,8 @@ def draw_panel(
 
 def read_key(fd: int) -> tuple[str, object]:
     def read_escape_tail() -> bytes:
-        # Read an escape sequence incrementally; macOS Terminal can split
-        # bytes across small intervals, so a single short poll is unreliable.
+        # Read an escape sequence byte-by-byte so we do not over-read into
+        # subsequent pasted payload bytes.
         seq = b""
         deadline = time.monotonic() + 0.05
         while time.monotonic() < deadline:
@@ -1323,12 +1388,18 @@ def read_key(fd: int) -> tuple[str, object]:
                 if seq:
                     break
                 continue
-            chunk = os.read(fd, 64)
+            chunk = os.read(fd, 1)
             if not chunk:
                 break
             seq += chunk
-            # Common CSI/SS3 final-byte termination.
-            if seq[-1:] and (64 <= seq[-1] <= 126):
+            # CSI sequence: ESC [ ... <final>
+            if seq.startswith(b"[") and len(seq) >= 2 and seq[-1:] and (64 <= seq[-1] <= 126):
+                break
+            # SS3 sequence: ESC O <final>
+            if seq.startswith(b"O") and len(seq) >= 2:
+                break
+            # Alt-modified key (ESC + single byte).
+            if not seq.startswith((b"[", b"O")) and len(seq) >= 1:
                 break
         return seq
 
@@ -1417,6 +1488,21 @@ def read_key(fd: int) -> tuple[str, object]:
             return "shift_end", None
         return None
 
+    def read_pending_burst(initial: bytes = b"") -> str:
+        buf = bytearray(initial)
+        deadline = time.monotonic() + 0.3
+        while time.monotonic() < deadline:
+            ready, _, _ = select.select([fd], [], [], 0.015)
+            if not ready:
+                break
+            chunk = os.read(fd, 4096)
+            if not chunk:
+                break
+            buf.extend(chunk)
+            if len(buf) >= 1_000_000:
+                break
+        return bytes(buf).decode("utf-8", errors="replace")
+
     while True:
         ready, _, _ = select.select([fd], [], [], 0.1)
         if not ready:
@@ -1433,6 +1519,11 @@ def read_key(fd: int) -> tuple[str, object]:
         if ch == 5:
             return "end", None
         if ch in (10, 13):
+            # If newline arrives with queued bytes, treat as pasted content
+            # instead of immediate submit.
+            queued, _, _ = select.select([fd], [], [], 0)
+            if queued:
+                return "paste_text", read_pending_burst(b"\n")
             return "enter", None
         if ch == 9:
             return "tab", None
@@ -1490,6 +1581,11 @@ def read_key(fd: int) -> tuple[str, object]:
                 return "paste", None
             continue
         if 32 <= ch < 127:
+            queued, _, _ = select.select([fd], [], [], 0)
+            if queued:
+                burst = read_pending_burst(bytes((ch,)))
+                if len(burst) > 1 or "\n" in burst:
+                    return "paste_text", burst
             return "char", chr(ch)
 
 
@@ -1760,7 +1856,7 @@ def run(
                     width = term_size.columns
                     term_lines = term_size.lines
                     render_width = max(1, width - max(1, anchor_col) + 1)
-                    required_query_rows = max(1, (len(query) + render_width - 1) // render_width)
+                    required_query_rows = max(1, len(build_query_visual_rows(query, render_width)))
                     desired_panel_rows = max(min_panel_rows, required_query_rows + min_result_rows)
                     max_panel_rows = max(1, term_lines - anchor_row + 1)
                     if desired_panel_rows > max_panel_rows and anchor_row > 1:
@@ -2012,7 +2108,23 @@ def run(
                             write_clipboard(query)
                         continue
                     if ev == "paste":
-                        pasted = read_clipboard()
+                        pasted = normalize_pasted_text(read_clipboard())
+                        if not pasted:
+                            continue
+                        sel = selection_bounds(sel_anchor, sel_end)
+                        if sel:
+                            query = query[: sel[0]] + pasted + query[sel[1] :]
+                            cursor_pos = sel[0] + len(pasted)
+                            clear_selection()
+                        else:
+                            query = query[:cursor_pos] + pasted + query[cursor_pos:]
+                            cursor_pos += len(pasted)
+                        sync_mouse_mode()
+                        selected = 0
+                        offset = 0
+                        continue
+                    if ev == "paste_text":
+                        pasted = normalize_pasted_text(str(payload))
                         if not pasted:
                             continue
                         sel = selection_bounds(sel_anchor, sel_end)
@@ -2055,8 +2167,13 @@ def run(
                         if anchor_row <= my < (anchor_row + query_rows_used):
                             click_row = my - anchor_row
                             click_col = max(0, max(anchor_col, mx) - anchor_col)
-                            click_pos = query_start + (click_row * render_width) + click_col
-                            click_pos = max(0, min(click_pos, len(query)))
+                            click_pos = query_pos_from_visual(
+                                query,
+                                render_width,
+                                query_start,
+                                click_row,
+                                click_col,
+                            )
     
                             if is_motion:
                                 if mouse_selecting:
@@ -2180,8 +2297,8 @@ def main() -> int:
         history_client=history_client,
     )
     if selected:
-        selected = normalize_shell_command(selected)
-        if not selected:
+        selected = selected.replace("\r\n", "\n").replace("\r", "\n").replace("\x00", "")
+        if not selected.strip():
             return 1
         if args.print_only:
             print(selected)
