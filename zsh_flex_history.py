@@ -313,6 +313,10 @@ def load_history_source(path: Path, *, use_custom_history: bool) -> list[str]:
 
 
 def append_custom_history_entry(path: Path, command: str, cwd: str, timestamp: str) -> bool:
+    normalized_command = command.strip()
+    normalized_cwd = cwd.strip()
+    if not normalized_command:
+        return False
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         if path.exists():
@@ -328,16 +332,16 @@ def append_custom_history_entry(path: Path, command: str, cwd: str, timestamp: s
         for item in payload:
             if (
                 isinstance(item, dict)
-                and item.get("command") == command
-                and item.get("cwd") == cwd
+                and item.get("command") == normalized_command
+                and item.get("cwd") == normalized_cwd
             ):
                 continue
             trimmed.append(item)
         payload = trimmed
         payload.append(
             {
-                "command": command,
-                "cwd": cwd,
+                "command": normalized_command,
+                "cwd": normalized_cwd,
                 "timestamp": timestamp,
             }
         )
