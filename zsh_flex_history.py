@@ -18,6 +18,8 @@ import threading
 import time
 import tempfile
 import tty
+from datetime import datetime, timezone
+import unicodedata
 from argparse import SUPPRESS, ArgumentParser
 from dataclasses import dataclass
 from pathlib import Path
@@ -256,6 +258,10 @@ def load_history(path: Path) -> list[str]:
     # Preserve recency ordering (newest first), then remove duplicate command
     # text while keeping the newest occurrence of each command.
     newest_first = list(reversed(entries))
+    return dedupe_preserving_newest(newest_first)
+
+
+def dedupe_preserving_newest(newest_first: list[str]) -> list[str]:
     deduped: list[str] = []
     seen: set[str] = set()
     for cmd in newest_first:
@@ -264,6 +270,83 @@ def load_history(path: Path) -> list[str]:
         seen.add(cmd)
         deduped.append(cmd)
     return deduped
+
+
+def default_custom_history_path() -> Path:
+    return Path(__file__).resolve().parent / "history.json"
+
+
+def ensure_custom_history_file(path: Path) -> None:
+    if path.exists():
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("[]\n", encoding="utf-8")
+
+
+def load_custom_history(path: Path) -> list[str]:
+    if not path.exists():
+        return []
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(raw, list):
+        return []
+    entries: list[str] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        cmd = item.get("command")
+        if not isinstance(cmd, str):
+            continue
+        cleaned = cmd.replace("\r\n", "\n").replace("\r", "\n").replace("\x00", "").strip("\n")
+        if cleaned.strip():
+            entries.append(cleaned)
+    newest_first = list(reversed(entries))
+    return dedupe_preserving_newest(newest_first)
+
+
+def load_history_source(path: Path, *, use_custom_history: bool) -> list[str]:
+    if use_custom_history:
+        return load_custom_history(path)
+    return load_history(path)
+
+
+def append_custom_history_entry(path: Path, command: str, cwd: str, timestamp: str) -> bool:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                payload = []
+        else:
+            payload = []
+        if not isinstance(payload, list):
+            payload = []
+        trimmed: list[object] = []
+        for item in payload:
+            if (
+                isinstance(item, dict)
+                and item.get("command") == command
+                and item.get("cwd") == cwd
+            ):
+                continue
+            trimmed.append(item)
+        payload = trimmed
+        payload.append(
+            {
+                "command": command,
+                "cwd": cwd,
+                "timestamp": timestamp,
+            }
+        )
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        tmp_path.replace(path)
+    except OSError:
+        return False
+    return True
 
 
 def spawn_history_loader(path: Path) -> queue.Queue[tuple[str, object]]:
@@ -281,13 +364,14 @@ def spawn_history_loader(path: Path) -> queue.Queue[tuple[str, object]]:
     return updates
 
 
-def default_daemon_socket_path() -> Path:
+def default_daemon_socket_path(*, use_custom_history: bool = False) -> Path:
     runtime_dir = os.environ.get("XDG_RUNTIME_DIR")
     if runtime_dir:
         base_dir = Path(runtime_dir)
     else:
         base_dir = Path(tempfile.gettempdir())
-    return base_dir / f"zsh-flex-history-{os.getuid()}.sock"
+    suffix = "-custom" if use_custom_history else ""
+    return base_dir / f"zsh-flex-history-{os.getuid()}{suffix}.sock"
 
 
 def history_file_signature(path: Path) -> tuple[int, int]:
@@ -858,7 +942,13 @@ def daemon_send_request(socket_path: Path, payload: dict[str, Any], *, timeout: 
     return decoded
 
 
-def launch_history_daemon(script_path: Path, history_path: Path, socket_path: Path) -> bool:
+def launch_history_daemon(
+    script_path: Path,
+    history_path: Path,
+    socket_path: Path,
+    *,
+    use_custom_history: bool = False,
+) -> bool:
     try:
         socket_path.parent.mkdir(parents=True, exist_ok=True)
     except OSError:
@@ -873,6 +963,8 @@ def launch_history_daemon(script_path: Path, history_path: Path, socket_path: Pa
         "--socket-path",
         str(socket_path),
     ]
+    if use_custom_history:
+        cmd.append("--use-custom-history")
     try:
         subprocess.Popen(
             cmd,
@@ -888,11 +980,20 @@ def launch_history_daemon(script_path: Path, history_path: Path, socket_path: Pa
 
 
 class HistoryDaemonClient:
-    def __init__(self, socket_path: Path, history_path: Path, script_path: Path, *, debug: bool = False) -> None:
+    def __init__(
+        self,
+        socket_path: Path,
+        history_path: Path,
+        script_path: Path,
+        *,
+        debug: bool = False,
+        use_custom_history: bool = False,
+    ) -> None:
         self.socket_path = socket_path
         self.history_path = history_path
         self.script_path = script_path
         self.debug = debug
+        self.use_custom_history = use_custom_history
 
     def ensure_running(self) -> bool:
         ping = daemon_send_request(self.socket_path, {"action": "ping"}, timeout=0.15)
@@ -909,7 +1010,12 @@ class HistoryDaemonClient:
                 pass
 
         daemon_debug_log(self.debug, f"starting new daemon at {self.socket_path}")
-        if not launch_history_daemon(self.script_path, self.history_path, self.socket_path):
+        if not launch_history_daemon(
+            self.script_path,
+            self.history_path,
+            self.socket_path,
+            use_custom_history=self.use_custom_history,
+        ):
             daemon_debug_log(self.debug, "failed to launch daemon process")
             return False
 
@@ -1037,8 +1143,20 @@ def daemon_write_response(conn: socket.socket, payload: dict[str, Any]) -> None:
         return
 
 
-def run_history_daemon(history_path: Path, socket_path: Path, *, debug: bool = False) -> int:
-    history = load_history(history_path)
+def run_history_daemon(
+    history_path: Path,
+    socket_path: Path,
+    *,
+    debug: bool = False,
+    use_custom_history: bool = False,
+) -> int:
+    if use_custom_history:
+        try:
+            ensure_custom_history_file(history_path)
+        except OSError as exc:
+            print(f"zsh_flex_history daemon: failed to initialize custom history: {exc}", file=sys.stderr)
+            return 1
+    history = load_history_source(history_path, use_custom_history=use_custom_history)
     signature = history_file_signature(history_path)
 
     try:
@@ -1082,7 +1200,7 @@ def run_history_daemon(history_path: Path, socket_path: Path, *, debug: bool = F
 
                     new_signature = history_file_signature(history_path)
                     if new_signature != signature:
-                        history = load_history(history_path)
+                        history = load_history_source(history_path, use_custom_history=use_custom_history)
                         signature = new_signature
 
                     action = request.get("action")
@@ -1142,7 +1260,38 @@ def run_history_daemon(history_path: Path, socket_path: Path, *, debug: bool = F
 def truncate_text(text: str, width: int) -> str:
     if width <= 0:
         return ""
-    return text[:width]
+    out: list[str] = []
+    used = 0
+    for ch in text:
+        w = char_display_width(ch)
+        if used + w > width and out:
+            break
+        if used + w > width:
+            break
+        out.append(ch)
+        used += w
+    return "".join(out)
+
+
+def char_display_width(ch: str) -> int:
+    if not ch:
+        return 0
+    if ch == "\n":
+        return 0
+    if ch == "\t":
+        return 4
+    codepoint = ord(ch)
+    if codepoint < 32 or (0x7F <= codepoint < 0xA0):
+        return 0
+    if unicodedata.combining(ch):
+        return 0
+    if unicodedata.east_asian_width(ch) in ("F", "W"):
+        return 2
+    return 1
+
+
+def text_display_width(text: str) -> int:
+    return sum(char_display_width(ch) for ch in text)
 
 
 def query_window(query: str, cursor_pos: int, available: int) -> tuple[int, str]:
@@ -1158,6 +1307,7 @@ class QueryVisualRow:
     start: int
     end: int
     text: str
+    display_width: int
 
 
 def build_query_visual_rows(query: str, render_width: int) -> list[QueryVisualRow]:
@@ -1165,22 +1315,35 @@ def build_query_visual_rows(query: str, render_width: int) -> list[QueryVisualRo
     rows: list[QueryVisualRow] = []
     start = 0
     buf: list[str] = []
+    buf_width = 0
     i = 0
     while i < len(query):
         ch = query[i]
         if ch == "\n":
-            rows.append(QueryVisualRow(start=start, end=i, text="".join(buf)))
+            rows.append(QueryVisualRow(start=start, end=i, text="".join(buf), display_width=buf_width))
             i += 1
             start = i
             buf = []
+            buf_width = 0
             continue
-        buf.append(ch)
-        i += 1
-        if len(buf) >= width:
-            rows.append(QueryVisualRow(start=start, end=i, text="".join(buf)))
+        ch_width = char_display_width(ch)
+        if ch_width > 0 and buf and (buf_width + ch_width) > width:
+            rows.append(QueryVisualRow(start=start, end=i, text="".join(buf), display_width=buf_width))
             start = i
             buf = []
-    rows.append(QueryVisualRow(start=start, end=len(query), text="".join(buf)))
+            buf_width = 0
+            continue
+        if ch_width > 0 and not buf and ch_width > width:
+            rows.append(QueryVisualRow(start=start, end=i + 1, text=ch, display_width=width))
+            i += 1
+            start = i
+            buf = []
+            buf_width = 0
+            continue
+        buf.append(ch)
+        buf_width += ch_width
+        i += 1
+    rows.append(QueryVisualRow(start=start, end=len(query), text="".join(buf), display_width=buf_width))
     return rows
 
 
@@ -1189,10 +1352,12 @@ def query_cursor_visual_position(rows: list[QueryVisualRow], cursor_pos: int) ->
         return 0, 0
     for rindex, row in enumerate(rows):
         if cursor_pos <= row.end:
-            col = max(0, min(cursor_pos - row.start, len(row.text)))
+            offset = max(0, min(cursor_pos - row.start, len(row.text)))
+            col = text_display_width(row.text[:offset])
+            col = max(0, min(col, row.display_width))
             return rindex, col
     last = rows[-1]
-    return len(rows) - 1, len(last.text)
+    return len(rows) - 1, last.display_width
 
 
 def query_pos_from_visual(
@@ -1208,9 +1373,17 @@ def query_pos_from_visual(
     row_index = max(0, min(row_start + click_row, len(rows) - 1))
     row = rows[row_index]
     col = max(0, click_col)
-    if col >= len(row.text):
+    if col >= row.display_width:
         return row.end
-    return row.start + col
+    used = 0
+    for idx, ch in enumerate(row.text):
+        w = char_display_width(ch)
+        if w <= 0:
+            continue
+        if col < used + w:
+            return row.start + idx
+        used += w
+    return row.end
 
 
 def wrapped_query_layout(
@@ -1244,7 +1417,8 @@ def render_result_line(item: MatchResult, selected: bool, width: int, *, unselec
         return ""
 
     body_width = width
-    text = truncate_text(item.text, body_width)
+    display_text = item.text.replace("\r", " ").replace("\n", " ")
+    text = truncate_text(display_text, body_width)
     pos_set = set(item.positions)
 
     match_fg = base16_ansi("base03")
@@ -1311,7 +1485,7 @@ def draw_panel(
     sel = selection_bounds(sel_anchor, sel_end)
     syntax_tokens = highlight_tokens(query)
     for row, vrow in enumerate(visible_query_rows):
-        seg_len = len(vrow.text)
+        seg_len = vrow.display_width
         query_parts: list[str] = [RESET]
         active_query_style = ""
         for i, ch in enumerate(vrow.text):
@@ -1503,6 +1677,30 @@ def read_key(fd: int) -> tuple[str, object]:
                 break
         return bytes(buf).decode("utf-8", errors="replace")
 
+    def read_utf8_char(first_byte: int) -> str:
+        if first_byte < 0x80:
+            return chr(first_byte)
+        need = 0
+        if (first_byte & 0xE0) == 0xC0:
+            need = 2
+        elif (first_byte & 0xF0) == 0xE0:
+            need = 3
+        elif (first_byte & 0xF8) == 0xF0:
+            need = 4
+        if need == 0:
+            return bytes((first_byte,)).decode("utf-8", errors="replace")
+        buf = bytearray((first_byte,))
+        deadline = time.monotonic() + 0.03
+        while len(buf) < need and time.monotonic() < deadline:
+            ready, _, _ = select.select([fd], [], [], 0.005)
+            if not ready:
+                break
+            chunk = os.read(fd, 1)
+            if not chunk:
+                break
+            buf.extend(chunk)
+        return bytes(buf).decode("utf-8", errors="replace")
+
     while True:
         ready, _, _ = select.select([fd], [], [], 0.1)
         if not ready:
@@ -1580,13 +1778,14 @@ def read_key(fd: int) -> tuple[str, object]:
             if full in (b"\x1bv", b"\x1bV"):
                 return "paste", None
             continue
-        if 32 <= ch < 127:
+        if ch >= 32:
             queued, _, _ = select.select([fd], [], [], 0)
             if queued:
                 burst = read_pending_burst(bytes((ch,)))
                 if len(burst) > 1 or "\n" in burst:
                     return "paste_text", burst
-            return "char", chr(ch)
+                return "char", burst
+            return "char", read_utf8_char(ch)
 
 
 def move_word_left(query: str, cursor_pos: int) -> int:
@@ -2262,14 +2461,36 @@ def main() -> int:
         action="store_true",
         help="Print daemon connection/startup diagnostics to stderr.",
     )
+    parser.add_argument(
+        "--use-custom-history",
+        action="store_true",
+        help="Use local JSON history at ./history.json (command, cwd, timestamp).",
+    )
     args = parser.parse_args()
 
-    history_path_value = args.history_file or os.environ.get("HISTFILE", str(Path.home() / ".zsh_history"))
-    history_path = Path(history_path_value).expanduser()
-    socket_path = Path(args.socket_path).expanduser() if args.socket_path else default_daemon_socket_path()
+    if args.use_custom_history:
+        history_path = default_custom_history_path()
+        try:
+            ensure_custom_history_file(history_path)
+        except OSError as exc:
+            print(f"zsh_flex_history: failed to initialize custom history file: {exc}", file=sys.stderr)
+            return 1
+    else:
+        history_path_value = args.history_file or os.environ.get("HISTFILE", str(Path.home() / ".zsh_history"))
+        history_path = Path(history_path_value).expanduser()
+    socket_path = (
+        Path(args.socket_path).expanduser()
+        if args.socket_path
+        else default_daemon_socket_path(use_custom_history=args.use_custom_history)
+    )
 
     if args.daemon:
-        return run_history_daemon(history_path, socket_path, debug=args.debug_daemon)
+        return run_history_daemon(
+            history_path,
+            socket_path,
+            debug=args.debug_daemon,
+            use_custom_history=args.use_custom_history,
+        )
 
     history_client: Optional[HistoryDaemonClient] = None
     history_updates: Optional[queue.Queue[tuple[str, object]]] = None
@@ -2279,6 +2500,7 @@ def main() -> int:
             history_path,
             Path(__file__).resolve(),
             debug=args.debug_daemon,
+            use_custom_history=args.use_custom_history,
         )
         if daemon_client.ensure_running():
             history_client = daemon_client
@@ -2300,6 +2522,13 @@ def main() -> int:
         selected = selected.replace("\r\n", "\n").replace("\r", "\n").replace("\x00", "")
         if not selected.strip():
             return 1
+        if args.use_custom_history:
+            append_custom_history_entry(
+                history_path,
+                selected,
+                os.getcwd(),
+                datetime.now(timezone.utc).isoformat(),
+            )
         if args.print_only:
             print(selected)
             return 0
