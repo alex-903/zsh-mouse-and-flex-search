@@ -11,6 +11,7 @@ import select
 import shlex
 import shutil
 import socket
+import sqlite3
 import subprocess
 import sys
 import termios
@@ -273,37 +274,50 @@ def dedupe_preserving_newest(newest_first: list[str]) -> list[str]:
 
 
 def default_custom_history_path() -> Path:
-    return Path(__file__).resolve().parent / "history.json"
+    return Path(__file__).resolve().parent / "history.db"
 
 
 def ensure_custom_history_file(path: Path) -> None:
-    if path.exists():
-        return
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("[]\n", encoding="utf-8")
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS custom_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                command TEXT NOT NULL,
+                cwd TEXT NOT NULL,
+                timestamp TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_custom_history_command_cwd ON custom_history(command, cwd)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_custom_history_id_desc ON custom_history(id DESC)"
+        )
+        conn.commit()
 
 
 def load_custom_history(path: Path) -> list[str]:
     if not path.exists():
         return []
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return []
-    if not isinstance(raw, list):
+        with sqlite3.connect(path) as conn:
+            rows = conn.execute("SELECT command FROM custom_history ORDER BY id DESC").fetchall()
+    except (OSError, sqlite3.Error):
         return []
     entries: list[str] = []
-    for item in raw:
-        if not isinstance(item, dict):
+    for row in rows:
+        if not isinstance(row, tuple) or len(row) < 1:
             continue
-        cmd = item.get("command")
+        cmd = row[0]
         if not isinstance(cmd, str):
             continue
         cleaned = cmd.replace("\r\n", "\n").replace("\r", "\n").replace("\x00", "").strip("\n")
         if cleaned.strip():
             entries.append(cleaned)
-    newest_first = list(reversed(entries))
-    return dedupe_preserving_newest(newest_first)
+    return dedupe_preserving_newest(entries)
 
 
 def load_history_source(path: Path, *, use_custom_history: bool) -> list[str]:
@@ -318,37 +332,18 @@ def append_custom_history_entry(path: Path, command: str, cwd: str, timestamp: s
     if not normalized_command:
         return False
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if path.exists():
-            try:
-                payload = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                payload = []
-        else:
-            payload = []
-        if not isinstance(payload, list):
-            payload = []
-        trimmed: list[object] = []
-        for item in payload:
-            if (
-                isinstance(item, dict)
-                and item.get("command") == normalized_command
-                and item.get("cwd") == normalized_cwd
-            ):
-                continue
-            trimmed.append(item)
-        payload = trimmed
-        payload.append(
-            {
-                "command": normalized_command,
-                "cwd": normalized_cwd,
-                "timestamp": timestamp,
-            }
-        )
-        tmp_path = path.with_suffix(path.suffix + ".tmp")
-        tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        tmp_path.replace(path)
-    except OSError:
+        ensure_custom_history_file(path)
+        with sqlite3.connect(path) as conn:
+            conn.execute(
+                "DELETE FROM custom_history WHERE command = ? AND cwd = ?",
+                (normalized_command, normalized_cwd),
+            )
+            conn.execute(
+                "INSERT INTO custom_history(command, cwd, timestamp) VALUES(?, ?, ?)",
+                (normalized_command, normalized_cwd, timestamp),
+            )
+            conn.commit()
+    except (OSError, sqlite3.Error):
         return False
     return True
 
@@ -2468,7 +2463,7 @@ def main() -> int:
     parser.add_argument(
         "--use-custom-history",
         action="store_true",
-        help="Use local JSON history at ./history.json (command, cwd, timestamp).",
+        help="Use local SQLite history at ./history.db (command, cwd, timestamp).",
     )
     args = parser.parse_args()
 
