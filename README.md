@@ -23,6 +23,19 @@ python3 zsh_flex_history.py
 - Shows a completing-read style vertical completion menu with highlighted match chars.
 - Takes over mouse `x` from the native terminal app only when there is any text in the prompt.
 
+## Options
+
+
+- `--use-custom-history`
+  - Uses an alternate history backend at `history.db` (SQLite) in this project directory.
+  - Stores commands as UTF-8 text by default, unlike zsh
+  - Includes extra metadata per entry (`command`, `cwd`, `timestamp`).
+- `--print-only`
+  - Prints the selected command to stdout instead of executing it.
+
+
+```
+
 ## Keys
 
 - `Up` / `Down` / Scroll: move selection
