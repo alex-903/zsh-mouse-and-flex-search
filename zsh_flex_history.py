@@ -84,7 +84,7 @@ def style(*, fg: Optional[int] = None, bold: bool = False, underline: bool = Fal
 
 
 RESET = "\x1b[0m"
-QUERY_SELECTION_BG = "\x1b[103m"
+QUERY_SELECTION_BG = "\x1b[7m"
 CLEAR_LINE = "\x1b[2K"
 CLEAR_TO_END = "\x1b[K"
 HIDE_CURSOR = "\x1b[?25l"
