@@ -19,7 +19,7 @@ ANSI_STYLE_BY_TOKEN = {
     "operator": "",             # default
     "comment": "\x1b[90m",      # bright black
     "assignment": "",           # default
-    "error": "\x1b[1;31m",      # bold red
+    "error": "",                # default (no special error coloring)
 }
 
 
