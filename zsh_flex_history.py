@@ -1941,10 +1941,10 @@ def run(
             last_query = ""
             last_matched_indices = initial_matched_indices
             initial_total_count = max(len(initial_results), initial_matched_count or 0)
-            match_cache: dict[tuple[str, int], tuple[Optional[list[int]], list[MatchResult], Optional[int], int]] = {
-                ("", cursor_pos): (initial_matched_indices, initial_results, initial_matched_count, initial_total_count)
+            match_cache: dict[str, tuple[Optional[list[int]], list[MatchResult], Optional[int], int]] = {
+                "": (initial_matched_indices, initial_results, initial_matched_count, initial_total_count)
             }
-            cache_order: list[tuple[str, int]] = [("", cursor_pos)]
+            cache_order: list[str] = [""]
             cache_limit = 128
             history_loading = history_updates is not None and history_client is None
             mouse_selecting = False
@@ -2006,7 +2006,7 @@ def run(
                 cursor_pos = len(query)
 
             def cache_put(
-                key: tuple[str, int],
+                key: str,
                 indices: Optional[list[int]],
                 cached_results: list[MatchResult],
                 matched_count: Optional[int],
@@ -2043,8 +2043,8 @@ def run(
                                         limit=MAX_RETURNED_RESULTS,
                                     )
                                     initial_total_count = max(len(initial_results), len(all_indices))
-                                    match_cache = {("", cursor_pos): (all_indices, initial_results, len(all_indices), initial_total_count)}
-                                    cache_order = [("", cursor_pos)]
+                                    match_cache = {"": (all_indices, initial_results, len(all_indices), initial_total_count)}
+                                    cache_order = [""]
                                 history_loading = False
                             elif kind == "error":
                                 history_loading = False
@@ -2076,7 +2076,7 @@ def run(
                         panel_rows,
                     )
                     visible = max(1, layout_results_visible)
-                    cache_key = (query, cursor_pos)
+                    cache_key = query
                     if cache_key in match_cache:
                         matched_indices, results, matched_count, total_count = match_cache[cache_key]
                     else:
@@ -2099,7 +2099,7 @@ def run(
                                 history_load_error = False
                             results = merge_runtime_and_rank(
                                 query,
-                                cursor_pos,
+                                len(query),
                                 history_results,
                                 limit=MAX_RETURNED_RESULTS,
                             )
@@ -2110,7 +2110,7 @@ def run(
                             results, matched_indices = search(
                                 query,
                                 history,
-                                cursor_pos=cursor_pos,
+                                cursor_pos=len(query),
                                 candidate_indices=candidate_indices,
                                 limit=MAX_RETURNED_RESULTS,
                             )
