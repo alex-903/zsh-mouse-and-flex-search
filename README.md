@@ -22,6 +22,7 @@ python3 zsh_flex_history.py
 - Uses in-order flexible fuzzy matching (similar to Emacs `flex`).
 - Shows a completing-read style vertical completion menu with highlighted match chars.
 - Takes over mouse `x` from the native terminal app only when there is any text in the prompt.
+- Syntax highlighting is "good enough" but incomplete
 
 ## Options
 
