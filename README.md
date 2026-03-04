@@ -34,7 +34,7 @@ python3 zsh_flex_history.py
   - Prints the selected command to stdout instead of executing it.
 
 
-```
+
 
 ## Keys
 
