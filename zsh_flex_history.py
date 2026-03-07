@@ -56,6 +56,13 @@ class MatchResult:
     positions: List[int]
     exact: bool = False
     recency: int = 0
+    cwd: Optional[str] = None
+
+
+@dataclass
+class HistoryEntry:
+    text: str
+    cwd: Optional[str] = None
 
 
 def base16_ansi(name: str) -> int:
@@ -218,8 +225,15 @@ def query_cursor_position(fd: int) -> Optional[tuple[int, int]]:
     return last_match
 
 
-def load_history(path: Path) -> list[str]:
-    entries: list[str] = []
+def normalize_cwd_value(cwd: str) -> str:
+    stripped = cwd.strip()
+    if not stripped:
+        return ""
+    return os.path.normpath(stripped)
+
+
+def load_history(path: Path) -> list[HistoryEntry]:
+    entries: list[HistoryEntry] = []
     if not path.exists():
         return entries
 
@@ -235,7 +249,7 @@ def load_history(path: Path) -> list[str]:
     def push_entry(text: str) -> None:
         cmd = text.rstrip("\n").replace("\\\n", "").strip()
         if cmd:
-            entries.append(cmd)
+            entries.append(HistoryEntry(text=cmd))
 
     for line in normalized.split("\n"):
         match = header_line_re.match(line)
@@ -251,7 +265,7 @@ def load_history(path: Path) -> list[str]:
 
         plain = line.strip()
         if plain:
-            entries.append(plain)
+            entries.append(HistoryEntry(text=plain))
 
     if current_extended is not None:
         push_entry(current_extended)
@@ -259,17 +273,17 @@ def load_history(path: Path) -> list[str]:
     # Preserve recency ordering (newest first), then remove duplicate command
     # text while keeping the newest occurrence of each command.
     newest_first = list(reversed(entries))
-    return dedupe_preserving_newest(newest_first)
+    return dedupe_history_entries_preserving_order(newest_first)
 
 
-def dedupe_preserving_newest(newest_first: list[str]) -> list[str]:
-    deduped: list[str] = []
+def dedupe_history_entries_preserving_order(entries: list[HistoryEntry]) -> list[HistoryEntry]:
+    deduped: list[HistoryEntry] = []
     seen: set[str] = set()
-    for cmd in newest_first:
-        if cmd in seen:
+    for entry in entries:
+        if entry.text in seen:
             continue
-        seen.add(cmd)
-        deduped.append(cmd)
+        seen.add(entry.text)
+        deduped.append(entry)
     return deduped
 
 
@@ -299,28 +313,30 @@ def ensure_custom_history_file(path: Path) -> None:
         conn.commit()
 
 
-def load_custom_history(path: Path) -> list[str]:
+def load_custom_history(path: Path) -> list[HistoryEntry]:
     if not path.exists():
         return []
     try:
         with sqlite3.connect(path) as conn:
-            rows = conn.execute("SELECT command FROM custom_history ORDER BY id DESC").fetchall()
+            rows = conn.execute("SELECT command, cwd FROM custom_history ORDER BY id DESC").fetchall()
     except (OSError, sqlite3.Error):
         return []
-    entries: list[str] = []
+    entries: list[HistoryEntry] = []
     for row in rows:
-        if not isinstance(row, tuple) or len(row) < 1:
+        if not isinstance(row, tuple) or len(row) < 2:
             continue
         cmd = row[0]
+        cwd = row[1]
         if not isinstance(cmd, str):
             continue
+        normalized_cwd = normalize_cwd_value(cwd) if isinstance(cwd, str) else ""
         cleaned = cmd.replace("\r\n", "\n").replace("\r", "\n").replace("\x00", "").strip("\n")
         if cleaned.strip():
-            entries.append(cleaned)
-    return dedupe_preserving_newest(entries)
+            entries.append(HistoryEntry(text=cleaned, cwd=normalized_cwd or None))
+    return entries
 
 
-def load_history_source(path: Path, *, use_custom_history: bool) -> list[str]:
+def load_history_source(path: Path, *, use_custom_history: bool) -> list[HistoryEntry]:
     if use_custom_history:
         return load_custom_history(path)
     return load_history(path)
@@ -328,7 +344,7 @@ def load_history_source(path: Path, *, use_custom_history: bool) -> list[str]:
 
 def append_custom_history_entry(path: Path, command: str, cwd: str, timestamp: str) -> bool:
     normalized_command = command.strip()
-    normalized_cwd = cwd.strip()
+    normalized_cwd = normalize_cwd_value(cwd)
     if not normalized_command:
         return False
     try:
@@ -743,9 +759,20 @@ def resolve_runtime_matches(
     return resolved
 
 
+def dedupe_match_results_preserving_order(results: list[MatchResult]) -> list[MatchResult]:
+    deduped: list[MatchResult] = []
+    seen: set[str] = set()
+    for item in results:
+        if item.text in seen:
+            continue
+        seen.add(item.text)
+        deduped.append(item)
+    return deduped
+
+
 def search_history_only(
     query: str,
-    history: list[str],
+    history: list[HistoryEntry],
     *,
     candidate_indices: Optional[list[int]] = None,
     limit: Optional[int] = None,
@@ -765,8 +792,8 @@ def search_history_only(
         else:
             source = candidate_indices[:result_limit]
         for idx in source:
-            cmd = history[idx]
-            results.append(MatchResult(cmd, 0, [], exact=False, recency=-idx))
+            entry = history[idx]
+            results.append(MatchResult(entry.text, 0, [], exact=False, recency=-idx, cwd=entry.cwd))
         if candidate_indices is None:
             return results, list(range(len(history)))
         return results, candidate_indices
@@ -776,7 +803,8 @@ def search_history_only(
     normalized_query = query.strip().lower()
 
     for idx in candidates:
-        cmd = history[idx]
+        entry = history[idx]
+        cmd = entry.text
         m = flex_match(query, cmd)
         if m is None:
             continue
@@ -785,6 +813,7 @@ def search_history_only(
 
         m.exact = bool(normalized_query) and cmd.strip().lower() == normalized_query
         m.recency = -idx
+        m.cwd = entry.cwd
         history_results.append(m)
 
     if result_limit is not None:
@@ -792,7 +821,30 @@ def search_history_only(
     return history_results, matched_indices
 
 
-def apply_prefix_priority(query: str, results: list[MatchResult], *, limit: Optional[int] = None) -> list[MatchResult]:
+def prefer_current_cwd(
+    results: list[MatchResult],
+    *,
+    current_cwd: Optional[str],
+) -> list[MatchResult]:
+    if not current_cwd:
+        return list(results)
+    same_cwd: list[MatchResult] = []
+    other: list[MatchResult] = []
+    for item in results:
+        if item.cwd == current_cwd:
+            same_cwd.append(item)
+        else:
+            other.append(item)
+    return same_cwd + other
+
+
+def apply_prefix_priority(
+    query: str,
+    results: list[MatchResult],
+    *,
+    limit: Optional[int] = None,
+    current_cwd: Optional[str] = None,
+) -> list[MatchResult]:
     result_limit = limit if (limit is None or limit > 0) else None
     if not results:
         return results
@@ -821,9 +873,13 @@ def apply_prefix_priority(query: str, results: list[MatchResult], *, limit: Opti
                 tier_prefix.append(item)
             else:
                 tier_rest.append(item)
-        ordered_results = tier_prefix + tier_rest
+        ordered_results = prefer_current_cwd(tier_prefix, current_cwd=current_cwd) + prefer_current_cwd(
+            tier_rest,
+            current_cwd=current_cwd,
+        )
     else:
-        ordered_results = results
+        ordered_results = prefer_current_cwd(results, current_cwd=current_cwd)
+    ordered_results = dedupe_match_results_preserving_order(ordered_results)
     if result_limit is not None:
         return ordered_results[:result_limit]
     return ordered_results
@@ -835,25 +891,28 @@ def merge_runtime_and_rank(
     history_results: list[MatchResult],
     *,
     limit: Optional[int] = None,
+    cwd: Optional[Path] = None,
 ) -> list[MatchResult]:
     regular_results = list(history_results)
+    current_cwd = normalize_cwd_value(str(cwd)) if cwd is not None else ""
 
     seen = {item.text for item in regular_results}
-    for runtime_match in resolve_runtime_matches(query, cursor_pos):
+    for runtime_match in resolve_runtime_matches(query, cursor_pos, cwd=cwd):
         if runtime_match.text in seen:
             continue
         regular_results.append(runtime_match)
 
-    return apply_prefix_priority(query, regular_results, limit=limit)
+    return apply_prefix_priority(query, regular_results, limit=limit, current_cwd=current_cwd or None)
 
 
 def search(
     query: str,
-    history: list[str],
+    history: list[HistoryEntry],
     *,
     cursor_pos: int = 0,
     candidate_indices: Optional[list[int]] = None,
     limit: Optional[int] = None,
+    cwd: Optional[Path] = None,
 ) -> tuple[list[MatchResult], list[int]]:
     history_results, matched_indices = search_history_only(
         query,
@@ -865,6 +924,7 @@ def search(
         cursor_pos,
         history_results,
         limit=limit,
+        cwd=cwd,
     )
     return results, matched_indices
 
@@ -876,6 +936,7 @@ def match_result_to_payload(item: MatchResult) -> dict[str, Any]:
         "positions": item.positions,
         "exact": item.exact,
         "recency": item.recency,
+        "cwd": item.cwd,
     }
 
 
@@ -887,7 +948,10 @@ def match_result_from_payload(payload: object) -> Optional[MatchResult]:
     positions = payload.get("positions")
     exact = payload.get("exact", False)
     recency = payload.get("recency", 0)
+    cwd = payload.get("cwd")
     if not isinstance(text, str) or not isinstance(score, int) or not isinstance(positions, list):
+        return None
+    if cwd is not None and not isinstance(cwd, str):
         return None
     parsed_positions: list[int] = []
     for pos in positions:
@@ -900,6 +964,7 @@ def match_result_from_payload(payload: object) -> Optional[MatchResult]:
         positions=parsed_positions,
         exact=bool(exact),
         recency=int(recency) if isinstance(recency, int) else 0,
+        cwd=cwd,
     )
 
 
@@ -1050,12 +1115,15 @@ class HistoryDaemonClient:
         *,
         candidate_indices: Optional[list[int]] = None,
         limit: Optional[int] = None,
+        cwd: Optional[str] = None,
     ) -> Optional[tuple[list[MatchResult], Optional[list[int]], int]]:
         payload: dict[str, Any] = {"action": "search_history", "query": query}
         if candidate_indices is not None and len(candidate_indices) <= 10_000:
             payload["candidate_indices"] = candidate_indices
         if limit is not None:
             payload["limit"] = limit
+        if cwd:
+            payload["cwd"] = normalize_cwd_value(cwd)
 
         response = daemon_send_request(self.socket_path, payload)
         if response is None:
@@ -1224,6 +1292,8 @@ def run_history_daemon(
                         candidate_indices = parsed_candidates
                     raw_limit = request.get("limit")
                     limit = raw_limit if isinstance(raw_limit, int) else None
+                    raw_cwd = request.get("cwd")
+                    current_cwd = normalize_cwd_value(raw_cwd) if isinstance(raw_cwd, str) else None
 
                     history_results_all, matched_indices = search_history_only(
                         query,
@@ -1231,7 +1301,12 @@ def run_history_daemon(
                         candidate_indices=candidate_indices,
                         limit=None,
                     )
-                    history_results = apply_prefix_priority(query, history_results_all, limit=limit)
+                    history_results = apply_prefix_priority(
+                        query,
+                        history_results_all,
+                        limit=limit,
+                        current_cwd=current_cwd,
+                    )
                     matched_count = len(matched_indices)
                     # Avoid sending a huge full-history index list for the
                     # empty query on startup; for any non-empty query, return
@@ -1807,7 +1882,7 @@ def move_word_right(query: str, cursor_pos: int) -> int:
 
 
 def run(
-    history: list[str],
+    history: list[HistoryEntry],
     *,
     inline_with_prompt: bool = False,
     history_updates: Optional[queue.Queue[tuple[str, object]]] = None,
@@ -1816,6 +1891,8 @@ def run(
     global TERM_OUT
     tty_in_file = None
     tty_out_file = None
+    current_cwd_text = normalize_cwd_value(os.getcwd())
+    current_cwd_path = Path(current_cwd_text)
     fd: Optional[int] = None
     for tty_path in ("/dev/tty", os.ctermid()):
         try:
@@ -1913,7 +1990,11 @@ def run(
             initial_matched_indices: Optional[list[int]] = None
             initial_matched_count: Optional[int] = None
             if history_client is not None:
-                loaded = history_client.search_history("", limit=MAX_RETURNED_RESULTS)
+                loaded = history_client.search_history(
+                    "",
+                    limit=MAX_RETURNED_RESULTS,
+                    cwd=current_cwd_text,
+                )
                 if loaded is None:
                     initial_results = []
                     history_load_error = True
@@ -1924,6 +2005,7 @@ def run(
                         cursor_pos,
                         history_matches,
                         limit=MAX_RETURNED_RESULTS,
+                        cwd=current_cwd_path,
                     )
                     history_load_error = False
             else:
@@ -1934,6 +2016,7 @@ def run(
                     cursor_pos=cursor_pos,
                     candidate_indices=all_indices,
                     limit=MAX_RETURNED_RESULTS,
+                    cwd=current_cwd_path,
                 )
                 initial_matched_indices = all_indices
                 initial_matched_count = len(all_indices)
@@ -2041,6 +2124,7 @@ def run(
                                         cursor_pos=cursor_pos,
                                         candidate_indices=all_indices,
                                         limit=MAX_RETURNED_RESULTS,
+                                        cwd=current_cwd_path,
                                     )
                                     initial_total_count = max(len(initial_results), len(all_indices))
                                     match_cache = {"": (all_indices, initial_results, len(all_indices), initial_total_count)}
@@ -2088,6 +2172,7 @@ def run(
                                 query,
                                 candidate_indices=candidate_indices,
                                 limit=MAX_RETURNED_RESULTS,
+                                cwd=current_cwd_text,
                             )
                             if remote is None:
                                 history_results = []
@@ -2102,6 +2187,7 @@ def run(
                                 len(query),
                                 history_results,
                                 limit=MAX_RETURNED_RESULTS,
+                                cwd=current_cwd_path,
                             )
                         else:
                             candidate_indices = all_indices
@@ -2113,6 +2199,7 @@ def run(
                                 cursor_pos=len(query),
                                 candidate_indices=candidate_indices,
                                 limit=MAX_RETURNED_RESULTS,
+                                cwd=current_cwd_path,
                             )
                             matched_count = len(matched_indices) if matched_indices is not None else None
                         total_count = max(len(results), matched_count or 0)
