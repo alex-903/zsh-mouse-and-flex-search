@@ -65,6 +65,7 @@ class HistoryEntry:
     text: str
     cwd: Optional[str] = None
     text_lower: str = ""
+    timestamp: Optional[str] = None
 
 
 def base16_ansi(name: str) -> int:
@@ -234,8 +235,8 @@ def normalize_cwd_value(cwd: str) -> str:
     return os.path.normpath(stripped)
 
 
-def make_history_entry(text: str, *, cwd: Optional[str] = None) -> HistoryEntry:
-    return HistoryEntry(text=text, cwd=cwd, text_lower=text.lower())
+def make_history_entry(text: str, *, cwd: Optional[str] = None, timestamp: Optional[str] = None) -> HistoryEntry:
+    return HistoryEntry(text=text, cwd=cwd, text_lower=text.lower(), timestamp=timestamp)
 
 
 def load_history(path: Path) -> list[HistoryEntry]:
@@ -319,32 +320,79 @@ def ensure_custom_history_file(path: Path) -> None:
         conn.commit()
 
 
-def load_custom_history(path: Path) -> list[HistoryEntry]:
+def load_custom_history_rows(path: Path, *, limit: Optional[int] = None) -> list[HistoryEntry]:
     if not path.exists():
         return []
+    query = "SELECT command, cwd, timestamp FROM custom_history ORDER BY id DESC"
+    params: tuple[object, ...] = ()
+    if limit is not None and limit > 0:
+        query += " LIMIT ?"
+        params = (limit,)
     try:
         with sqlite3.connect(path) as conn:
-            rows = conn.execute("SELECT command, cwd FROM custom_history ORDER BY id DESC").fetchall()
+            rows = conn.execute(query, params).fetchall()
     except (OSError, sqlite3.Error):
         return []
     entries: list[HistoryEntry] = []
     for row in rows:
-        if not isinstance(row, tuple) or len(row) < 2:
+        if not isinstance(row, tuple) or len(row) < 3:
             continue
         cmd = row[0]
         cwd = row[1]
+        timestamp = row[2]
         if not isinstance(cmd, str):
             continue
         normalized_cwd = normalize_cwd_value(cwd) if isinstance(cwd, str) else ""
+        normalized_timestamp = timestamp if isinstance(timestamp, str) else None
         cleaned = cmd.replace("\r\n", "\n").replace("\r", "\n").replace("\x00", "").strip("\n")
         if cleaned.strip():
-            entries.append(make_history_entry(cleaned, cwd=normalized_cwd or None))
+            entries.append(make_history_entry(cleaned, cwd=normalized_cwd or None, timestamp=normalized_timestamp))
     return entries
 
 
-def load_history_source(path: Path, *, use_custom_history: bool) -> list[HistoryEntry]:
+def load_custom_history(path: Path, *, existing_history: Optional[list[HistoryEntry]] = None) -> list[HistoryEntry]:
+    if not existing_history:
+        return load_custom_history_rows(path)
+
+    recent_entries = load_custom_history_rows(path, limit=10)
+    if not recent_entries:
+        return []
+
+    existing_keys = {
+        (entry.timestamp, entry.text, entry.cwd)
+        for entry in existing_history
+        if entry.timestamp is not None
+    }
+    overlap_at: Optional[int] = None
+    for idx, entry in enumerate(recent_entries):
+        if (entry.timestamp, entry.text, entry.cwd) in existing_keys:
+            overlap_at = idx
+            break
+
+    if overlap_at is None:
+        return load_custom_history_rows(path)
+
+    newer_entries = [
+        entry
+        for entry in recent_entries[:overlap_at]
+        if (entry.timestamp, entry.text, entry.cwd) not in existing_keys
+    ]
+    if not newer_entries:
+        return existing_history
+
+    replaced_pairs = {(entry.text, entry.cwd) for entry in newer_entries}
+    merged_history = [entry for entry in existing_history if (entry.text, entry.cwd) not in replaced_pairs]
+    return newer_entries + merged_history
+
+
+def load_history_source(
+    path: Path,
+    *,
+    use_custom_history: bool,
+    existing_history: Optional[list[HistoryEntry]] = None,
+) -> list[HistoryEntry]:
     if use_custom_history:
-        return load_custom_history(path)
+        return load_custom_history(path, existing_history=existing_history)
     return load_history(path)
 
 
@@ -1285,7 +1333,11 @@ def run_history_daemon(
 
                     new_signature = history_file_signature(history_path)
                     if new_signature != signature:
-                        history = load_history_source(history_path, use_custom_history=use_custom_history)
+                        history = load_history_source(
+                            history_path,
+                            use_custom_history=use_custom_history,
+                            existing_history=history if use_custom_history else None,
+                        )
                         signature = new_signature
 
                     action = request.get("action")
