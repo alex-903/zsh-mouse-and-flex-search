@@ -57,12 +57,14 @@ class MatchResult:
     exact: bool = False
     recency: int = 0
     cwd: Optional[str] = None
+    text_lower: Optional[str] = None
 
 
 @dataclass
 class HistoryEntry:
     text: str
     cwd: Optional[str] = None
+    text_lower: str = ""
 
 
 def base16_ansi(name: str) -> int:
@@ -232,6 +234,10 @@ def normalize_cwd_value(cwd: str) -> str:
     return os.path.normpath(stripped)
 
 
+def make_history_entry(text: str, *, cwd: Optional[str] = None) -> HistoryEntry:
+    return HistoryEntry(text=text, cwd=cwd, text_lower=text.lower())
+
+
 def load_history(path: Path) -> list[HistoryEntry]:
     entries: list[HistoryEntry] = []
     if not path.exists():
@@ -249,7 +255,7 @@ def load_history(path: Path) -> list[HistoryEntry]:
     def push_entry(text: str) -> None:
         cmd = text.rstrip("\n").replace("\\\n", "").strip()
         if cmd:
-            entries.append(HistoryEntry(text=cmd))
+            entries.append(make_history_entry(cmd))
 
     for line in normalized.split("\n"):
         match = header_line_re.match(line)
@@ -265,7 +271,7 @@ def load_history(path: Path) -> list[HistoryEntry]:
 
         plain = line.strip()
         if plain:
-            entries.append(HistoryEntry(text=plain))
+            entries.append(make_history_entry(plain))
 
     if current_extended is not None:
         push_entry(current_extended)
@@ -332,7 +338,7 @@ def load_custom_history(path: Path) -> list[HistoryEntry]:
         normalized_cwd = normalize_cwd_value(cwd) if isinstance(cwd, str) else ""
         cleaned = cmd.replace("\r\n", "\n").replace("\r", "\n").replace("\x00", "").strip("\n")
         if cleaned.strip():
-            entries.append(HistoryEntry(text=cleaned, cwd=normalized_cwd or None))
+            entries.append(make_history_entry(cleaned, cwd=normalized_cwd or None))
     return entries
 
 
@@ -402,12 +408,12 @@ def daemon_debug_log(enabled: bool, message: str) -> None:
         print(f"[zsh_flex_history daemon] {message}", file=sys.stderr)
 
 
-def flex_match(query: str, candidate: str) -> Optional[MatchResult]:
+def flex_match(query: str, candidate: str, *, candidate_lower: Optional[str] = None) -> Optional[MatchResult]:
     if not query:
-        return MatchResult(candidate, 0, [])
+        return MatchResult(candidate, 0, [], text_lower=candidate_lower or candidate.lower())
 
     q = query.lower()
-    c = candidate.lower()
+    c = candidate_lower if candidate_lower is not None else candidate.lower()
 
     positions: list[int] = []
     at = 0
@@ -449,7 +455,7 @@ def flex_match(query: str, candidate: str) -> Optional[MatchResult]:
     score -= gap_penalty
     score -= len(candidate) // 8
 
-    return MatchResult(candidate, score, positions)
+    return MatchResult(candidate, score, positions, text_lower=c)
 
 
 def token_bounds(query: str, cursor_pos: int) -> tuple[int, int]:
@@ -750,10 +756,11 @@ def resolve_runtime_matches(
         if candidate in seen:
             continue
         seen.add(candidate)
-        matched = flex_match(query, candidate)
+        candidate_lower = candidate.lower()
+        matched = flex_match(query, candidate, candidate_lower=candidate_lower)
         positions = matched.positions if matched is not None else []
         score = matched.score if matched is not None else -10_000
-        resolved.append(MatchResult(candidate, score, positions))
+        resolved.append(MatchResult(candidate, score, positions, text_lower=candidate_lower))
         if len(resolved) >= limit:
             break
     return resolved
@@ -793,7 +800,17 @@ def search_history_only(
             source = candidate_indices[:result_limit]
         for idx in source:
             entry = history[idx]
-            results.append(MatchResult(entry.text, 0, [], exact=False, recency=-idx, cwd=entry.cwd))
+            results.append(
+                MatchResult(
+                    entry.text,
+                    0,
+                    [],
+                    exact=False,
+                    recency=-idx,
+                    cwd=entry.cwd,
+                    text_lower=entry.text_lower,
+                )
+            )
         if candidate_indices is None:
             return results, list(range(len(history)))
         return results, candidate_indices
@@ -805,7 +822,7 @@ def search_history_only(
     for idx in candidates:
         entry = history[idx]
         cmd = entry.text
-        m = flex_match(query, cmd)
+        m = flex_match(query, cmd, candidate_lower=entry.text_lower)
         if m is None:
             continue
 
@@ -814,6 +831,7 @@ def search_history_only(
         m.exact = bool(normalized_query) and cmd.strip().lower() == normalized_query
         m.recency = -idx
         m.cwd = entry.cwd
+        m.text_lower = entry.text_lower
         history_results.append(m)
 
     if result_limit is not None:
@@ -854,7 +872,7 @@ def apply_prefix_priority(
     max_prefix_len = 0
     if query_prefix:
         for item in results:
-            text_lower = item.text.lower()
+            text_lower = item.text_lower if item.text_lower is not None else item.text.lower()
             match_len = 0
             max_check = min(len(query_prefix), len(text_lower))
             while match_len < max_check and query_prefix[match_len] == text_lower[match_len]:
