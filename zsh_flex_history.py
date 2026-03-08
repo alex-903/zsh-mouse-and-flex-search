@@ -2108,6 +2108,63 @@ def run(
             left_click_count = 0
             last_drawn_panel_rows = panel_rows
 
+            def refresh_anchor_from_cursor() -> None:
+                nonlocal start_row, start_col, anchor_row, anchor_col, panel_rows, last_drawn_panel_rows
+                old_anchor_row = anchor_row
+                old_anchor_col = anchor_col
+                old_panel_rows = max(panel_rows, last_drawn_panel_rows)
+
+                term_size = tty_terminal_size(fd)
+                term_lines = term_size.lines
+                pos = query_cursor_position(fd)
+                if pos is None:
+                    next_start_row = max(1, term_lines - 1)
+                    next_start_col = 1
+                else:
+                    next_start_row = pos[0]
+                    next_start_col = pos[1]
+
+                next_start_row = max(1, min(next_start_row, term_lines))
+                space_below = max(0, term_lines - next_start_row)
+                if inline_with_prompt:
+                    required_below = max(0, min_panel_rows - 1)
+                else:
+                    required_below = min_panel_rows
+                scroll_rows = max(0, required_below - space_below)
+                if scroll_rows > 0:
+                    term_write(move_to(term_lines, 1) + ("\n" * scroll_rows))
+                    term_flush()
+                    next_start_row = max(1, next_start_row - scroll_rows)
+                    space_below = max(0, term_lines - next_start_row)
+
+                if inline_with_prompt:
+                    next_anchor_row = max(1, next_start_row)
+                    next_anchor_col = max(1, next_start_col)
+                    next_panel_rows = max(1, term_lines - next_anchor_row + 1)
+                elif space_below >= 1:
+                    next_anchor_row = next_start_row + 1
+                    next_anchor_col = 1
+                    next_panel_rows = max(1, space_below)
+                else:
+                    next_anchor_row = max(1, next_start_row)
+                    next_anchor_col = 1
+                    next_panel_rows = max(1, term_lines - next_anchor_row + 1)
+
+                for row in range(old_anchor_row, old_anchor_row + old_panel_rows):
+                    term_write(move_to(row, old_anchor_col) + CLEAR_TO_END)
+
+                start_row = next_start_row
+                start_col = next_start_col
+                anchor_row = next_anchor_row
+                anchor_col = next_anchor_col
+                panel_rows = next_panel_rows
+                last_drawn_panel_rows = panel_rows
+
+                for row in range(anchor_row, anchor_row + panel_rows):
+                    term_write(move_to(row, anchor_col) + CLEAR_TO_END)
+                term_write(move_to(anchor_row, anchor_col))
+                term_flush()
+
             def clear_panel_and_restore_cursor() -> None:
                 # Clear panel content so repeated invocations always start clean.
                 for row in range(anchor_row, anchor_row + max(panel_rows, last_drawn_panel_rows)):
@@ -2443,6 +2500,8 @@ def run(
                         continue
                     if ev == "char":
                         ch = str(payload)
+                        if not query:
+                            refresh_anchor_from_cursor()
                         sel = selection_bounds(sel_anchor, sel_end)
                         if sel:
                             query = query[: sel[0]] + ch + query[sel[1] :]
