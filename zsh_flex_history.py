@@ -774,6 +774,17 @@ def command_completion_replacements(query: str, cursor_pos: int, *, limit: int =
     return replacements
 
 
+def cursor_in_first_token(query: str, cursor_pos: int) -> bool:
+    stripped = query.lstrip()
+    if not stripped:
+        return False
+    leading_ws = len(query) - len(stripped)
+    first_end = leading_ws
+    while first_end < len(query) and not query[first_end].isspace():
+        first_end += 1
+    return leading_ws <= cursor_pos <= first_end
+
+
 def resolve_runtime_matches(
     query: str,
     cursor_pos: int,
@@ -782,6 +793,8 @@ def resolve_runtime_matches(
     limit: int = 64,
 ) -> list[MatchResult]:
     if not query.strip():
+        return []
+    if not cursor_in_first_token(query, cursor_pos):
         return []
 
     command = command_token_for_query(query) or ""
@@ -2379,7 +2392,7 @@ def run(
                                 cwd=current_cwd_path,
                             )
                             matched_count = len(matched_indices) if matched_indices is not None else None
-                        total_count = max(len(results), matched_count or 0)
+                        total_count = len(results)
                         cache_put(cache_key, matched_indices, results, matched_count, total_count)
                     last_query = query
                     last_matched_indices = matched_indices
