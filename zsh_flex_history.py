@@ -683,8 +683,10 @@ def path_completion_replacements(
                 is_dir = entry.is_dir(follow_symlinks=False)
                 if is_dir:
                     suggested_piece += "/"
-                if display_prefix in ("", "."):
+                if display_prefix == "":
                     completed_token = suggested_piece
+                elif display_prefix == ".":
+                    completed_token = "./" + suggested_piece
                 elif display_prefix == "/":
                     completed_token = "/" + suggested_piece
                 else:
