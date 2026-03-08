@@ -904,6 +904,42 @@ def prefer_current_cwd(
     return same_cwd + other
 
 
+def ordered_query_word_positions(query: str, text_lower: str) -> Optional[list[int]]:
+    words = query.lower().split()
+    if len(words) < 2:
+        return None
+
+    at = 0
+    positions: list[int] = []
+    for word in words:
+        idx = text_lower.find(word, at)
+        if idx == -1:
+            return None
+        positions.extend(range(idx, idx + len(word)))
+        at = idx + len(word)
+    return positions
+
+
+def apply_inner_bucket_priority(
+    query: str,
+    results: list[MatchResult],
+    *,
+    current_cwd: Optional[str],
+) -> list[MatchResult]:
+    words_in_order: list[MatchResult] = []
+    rest: list[MatchResult] = []
+    for item in results:
+        text_lower = item.text_lower if item.text_lower is not None else item.text.lower()
+        if ordered_query_word_positions(query, text_lower) is not None:
+            words_in_order.append(item)
+        else:
+            rest.append(item)
+    return prefer_current_cwd(words_in_order, current_cwd=current_cwd) + prefer_current_cwd(
+        rest,
+        current_cwd=current_cwd,
+    )
+
+
 def apply_prefix_priority(
     query: str,
     results: list[MatchResult],
@@ -939,12 +975,17 @@ def apply_prefix_priority(
                 tier_prefix.append(item)
             else:
                 tier_rest.append(item)
-        ordered_results = prefer_current_cwd(tier_prefix, current_cwd=current_cwd) + prefer_current_cwd(
+        ordered_results = apply_inner_bucket_priority(
+            query,
+            tier_prefix,
+            current_cwd=current_cwd,
+        ) + apply_inner_bucket_priority(
+            query,
             tier_rest,
             current_cwd=current_cwd,
         )
     else:
-        ordered_results = prefer_current_cwd(results, current_cwd=current_cwd)
+        ordered_results = apply_inner_bucket_priority(query, results, current_cwd=current_cwd)
     ordered_results = dedupe_match_results_preserving_order(ordered_results)
     if result_limit is not None:
         return ordered_results[:result_limit]
@@ -1556,14 +1597,22 @@ def selection_bounds(sel_anchor: Optional[int], sel_end: Optional[int]) -> Optio
     return (min(sel_anchor, sel_end), max(sel_anchor, sel_end))
 
 
-def render_result_line(item: MatchResult, selected: bool, width: int, *, unselected_white: bool = False) -> str:
+def render_result_line(
+    item: MatchResult,
+    selected: bool,
+    width: int,
+    *,
+    query: str = "",
+    unselected_white: bool = False,
+) -> str:
     if width <= 0:
         return ""
 
     body_width = width
     display_text = item.text.replace("\r", " ").replace("\n", " ")
     text = truncate_text(display_text, body_width)
-    pos_set = set(item.positions)
+    ordered_positions = ordered_query_word_positions(query, item.text_lower if item.text_lower is not None else item.text.lower())
+    pos_set = set(ordered_positions if ordered_positions is not None else item.positions)
 
     match_fg = base16_ansi("base03")
 
@@ -1678,6 +1727,7 @@ def draw_panel(
             results[idx],
             idx == selected,
             result_width,
+            query=query,
             unselected_white=True,
         )
         lines.append(f"{base_line}{suffix}")
