@@ -1688,11 +1688,11 @@ def render_result_line(
     ordered_positions = ordered_query_word_positions(query, item.text_lower if item.text_lower is not None else item.text.lower())
     pos_set = set(ordered_positions if ordered_positions is not None else item.positions)
 
-    match_fg = DORIC["fg_shadow_intense"]
+    match_fg = DORIC["fg_red"]
     row_fg = DORIC["fg_main"] if unselected_white else DORIC["fg_neutral"]
     row_bg = DORIC["bg_shadow_subtle"]
-    selected_fg = DORIC["fg_accent"]
-    selected_bg = DORIC["bg_accent"]
+    selected_fg = DORIC["fg_red"]
+    selected_bg = DORIC["bg_red"]
 
     if selected:
         normal_style = RESET + style(fg_rgb=selected_fg, bg_rgb=selected_bg, bold=True)
@@ -1704,7 +1704,7 @@ def render_result_line(
         match_style = style(fg_rgb=match_fg, bg_rgb=row_bg, underline=True)
 
     if selected:
-        gutter = f"{style(bg_rgb=DORIC['bg_accent'])} {RESET}"
+        gutter = f"{style(bg_rgb=DORIC['bg_red'])} {RESET}"
     else:
         gutter = f"{style(bg_rgb=row_bg)} {RESET}"
 
