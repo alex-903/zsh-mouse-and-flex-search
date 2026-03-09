@@ -2089,6 +2089,8 @@ def run(
                 term_flush()
                 start_row = max(1, start_row - scroll_rows)
                 space_below = max(0, term_lines - start_row)
+            initial_cursor_row = start_row
+            initial_cursor_col = start_col
 
             # For print-only mode, anchor on the prompt row itself so query
             # input starts on the same line as the prompt.
@@ -2175,6 +2177,7 @@ def run(
 
             def refresh_anchor_from_cursor() -> None:
                 nonlocal start_row, start_col, anchor_row, anchor_col, panel_rows, last_drawn_panel_rows
+                nonlocal initial_cursor_row, initial_cursor_col
                 old_anchor_row = anchor_row
                 old_anchor_col = anchor_col
                 old_panel_rows = max(panel_rows, last_drawn_panel_rows)
@@ -2185,9 +2188,16 @@ def run(
                 if pos is None:
                     next_start_row = max(1, term_lines - 1)
                     next_start_col = 1
-                else:
+                elif pos[0] == 1:
                     next_start_row = pos[0]
                     next_start_col = pos[1]
+                    initial_cursor_row = next_start_row
+                    initial_cursor_col = next_start_col
+                else:
+                    next_start_row = initial_cursor_row
+                    next_start_col = initial_cursor_col
+                    term_write(move_to(initial_cursor_row, initial_cursor_col))
+                    term_flush()
 
                 next_start_row = max(1, min(next_start_row, term_lines))
                 space_below = max(0, term_lines - next_start_row)
