@@ -48,6 +48,33 @@ BASE16_TO_ANSI = {
     "base0F": 9,
 }
 
+DORIC = {
+    "cursor": "#2266bb",
+    "bg_main": "#ffffff",
+    "fg_main": "#000000",
+    "border": "#b0b0b0",
+    "bg_shadow_subtle": "#efeff2",
+    "fg_shadow_subtle": "#5a6268",
+    "bg_neutral": "#dbdce1",
+    "fg_neutral": "#424d53",
+    "bg_shadow_intense": "#a0bcd0",
+    "fg_shadow_intense": "#213067",
+    "bg_accent": "#d8f1f3",
+    "fg_accent": "#084092",
+    "fg_red": "#a01010",
+    "fg_green": "#106710",
+    "fg_yellow": "#60400f",
+    "fg_blue": "#103077",
+    "fg_magenta": "#700d50",
+    "fg_cyan": "#005355",
+    "bg_red": "#f0c4c4",
+    "bg_green": "#c0e8c2",
+    "bg_yellow": "#f0f0b0",
+    "bg_blue": "#c4cfe8",
+    "bg_magenta": "#eec2e6",
+    "bg_cyan": "#c1ebe4",
+}
+
 
 @dataclass
 class MatchResult:
@@ -80,7 +107,28 @@ def fg_code(slot: int) -> str:
     return "39"
 
 
-def style(*, fg: Optional[int] = None, bold: bool = False, underline: bool = False) -> str:
+def bg_code(slot: int) -> str:
+    if 0 <= slot <= 7:
+        return str(40 + slot)
+    if 8 <= slot <= 15:
+        return str(100 + (slot - 8))
+    return "49"
+
+
+def hex_to_rgb(value: str) -> tuple[int, int, int]:
+    value = value.lstrip("#")
+    return int(value[0:2], 16), int(value[2:4], 16), int(value[4:6], 16)
+
+
+def style(
+    *,
+    fg: Optional[int] = None,
+    bg: Optional[int] = None,
+    fg_rgb: Optional[str] = None,
+    bg_rgb: Optional[str] = None,
+    bold: bool = False,
+    underline: bool = False,
+) -> str:
     codes: list[str] = []
     if bold:
         codes.append("1")
@@ -88,13 +136,21 @@ def style(*, fg: Optional[int] = None, bold: bool = False, underline: bool = Fal
         codes.append("4")
     if fg is not None:
         codes.append(fg_code(fg))
+    if bg is not None:
+        codes.append(bg_code(bg))
+    if fg_rgb is not None:
+        r, g, b = hex_to_rgb(fg_rgb)
+        codes.extend(["38", "2", str(r), str(g), str(b)])
+    if bg_rgb is not None:
+        r, g, b = hex_to_rgb(bg_rgb)
+        codes.extend(["48", "2", str(r), str(g), str(b)])
     if not codes:
         return ""
     return f"\x1b[{';'.join(codes)}m"
 
 
 RESET = "\x1b[0m"
-QUERY_SELECTION_BG = "\x1b[7m"
+QUERY_SELECTION_BG = style(fg_rgb=DORIC["fg_blue"], bg_rgb=DORIC["bg_blue"])
 CLEAR_LINE = "\x1b[2K"
 CLEAR_TO_END = "\x1b[K"
 HIDE_CURSOR = "\x1b[?25l"
@@ -1619,34 +1675,38 @@ def render_result_line(
     *,
     query: str = "",
     unselected_white: bool = False,
+    suffix_text: str = "",
 ) -> str:
     if width <= 0:
         return ""
 
-    body_width = width
+    gutter_width = 2
+    suffix_width = text_display_width(suffix_text) + 4 if suffix_text else 0
+    body_width = max(0, width - gutter_width - suffix_width)
     display_text = item.text.replace("\r", " ").replace("\n", " ")
     text = truncate_text(display_text, body_width)
     ordered_positions = ordered_query_word_positions(query, item.text_lower if item.text_lower is not None else item.text.lower())
     pos_set = set(ordered_positions if ordered_positions is not None else item.positions)
 
-    match_fg = base16_ansi("base03")
+    match_fg = DORIC["fg_shadow_intense"]
+    row_fg = DORIC["fg_main"] if unselected_white else DORIC["fg_neutral"]
+    row_bg = DORIC["bg_shadow_subtle"]
+    selected_fg = DORIC["fg_accent"]
+    selected_bg = DORIC["bg_accent"]
 
     if selected:
-        # Explicit reset before selected non-match style prevents underline
-        # from leaking from previously underlined match segments.
-        normal_style = RESET + style(bold=True)
-    elif unselected_white:
-        normal_style = ""
+        normal_style = RESET + style(fg_rgb=selected_fg, bg_rgb=selected_bg, bold=True)
     else:
-        normal_style = ""
-    # Match characters are grey by default; selected match chars are
-    # both bold and underlined.
+        normal_style = RESET + style(fg_rgb=row_fg, bg_rgb=row_bg)
     if selected:
-        # Keep selected matches on default foreground so underline is clear,
-        # while the whole selected row remains bold.
-        match_style = RESET + style(bold=True, underline=True)
+        match_style = RESET + style(fg_rgb=selected_fg, bg_rgb=selected_bg, bold=True, underline=True)
     else:
-        match_style = style(fg=match_fg, underline=True)
+        match_style = style(fg_rgb=match_fg, bg_rgb=row_bg, underline=True)
+
+    if selected:
+        gutter = f"{style(fg_rgb=DORIC['fg_accent'], bg_rgb=DORIC['bg_accent'], bold=True)}▌{RESET} "
+    else:
+        gutter = f"{style(fg_rgb=DORIC['border'])}│{RESET} "
 
     out: list[str] = []
     active_style = ""
@@ -1656,8 +1716,18 @@ def render_result_line(
             out.append(target_style if target_style else RESET)
             active_style = target_style
         out.append(ch)
+    pad_width = max(0, body_width - text_display_width(text))
+    if pad_width > 0:
+        if normal_style != active_style:
+            out.append(normal_style)
+        out.append(" " * pad_width)
+    if suffix_text:
+        if normal_style != active_style:
+            out.append(normal_style)
+        out.append("  ")
+        out.append(f"{style(fg_rgb=DORIC['fg_shadow_subtle'], bg_rgb=selected_bg if selected else row_bg)}[{suffix_text}]{RESET}")
     out.append(RESET)
-    return "".join(out)
+    return gutter + "".join(out)
 
 
 def draw_panel(
@@ -1678,7 +1748,8 @@ def draw_panel(
 ) -> tuple[int, int, int, int]:
     anchor_col = max(1, anchor_col)
     render_width = max(1, width - anchor_col + 1)
-    muted = style(fg=base16_ansi("base03"))
+    muted = style(fg_rgb=DORIC["fg_shadow_subtle"])
+    query_prefix = style(fg_rgb=DORIC["fg_shadow_intense"], bold=True)
 
     lines: list[str] = []
     cursor_pos = max(0, min(cursor_pos, len(query)))
@@ -1715,7 +1786,7 @@ def draw_panel(
             query_parts.append(ch)
         if active_query_style:
             query_parts.append(RESET)
-        query_line = "".join(query_parts)
+        query_line = f"{query_prefix}› {RESET}" + "".join(query_parts)
         if row == 0 and debug_note:
             room = max(0, render_width - seg_len)
             if room > 0:
@@ -1729,23 +1800,24 @@ def draw_panel(
         idx = offset + i
         if idx >= len(results):
             if i == 0 and status_message:
-                lines.append(f"{style(fg=base16_ansi('base03'))}{status_message}{RESET}")
+                lines.append(
+                    f"{style(fg_rgb=DORIC['fg_shadow_intense'], bg_rgb=DORIC['bg_neutral'], bold=True)} {status_message} {RESET}"
+                )
             else:
                 lines.append("")
             continue
         remaining = max(0, effective_total - (offset + results_visible))
         is_last_visible_row = i == (results_visible - 1)
         more_text = f"{remaining} more" if (is_last_visible_row and remaining > 0) else ""
-        suffix = f"    {muted}{more_text}{RESET}" if more_text else ""
-        result_width = max(0, render_width - len(more_text) - (4 if more_text else 0))
         base_line = render_result_line(
             results[idx],
             idx == selected,
-            result_width,
+            render_width,
             query=query,
             unselected_white=True,
+            suffix_text=more_text,
         )
-        lines.append(f"{base_line}{suffix}")
+        lines.append(base_line)
 
     for i, line in enumerate(lines[:panel_rows]):
         term_write(move_to(anchor_row + i, anchor_col) + CLEAR_TO_END + line)
