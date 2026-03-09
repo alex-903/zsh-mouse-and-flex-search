@@ -1706,7 +1706,7 @@ def render_result_line(
     if selected:
         gutter = f"{style(fg_rgb=DORIC['fg_accent'], bg_rgb=DORIC['bg_accent'], bold=True)}▌{RESET}"
     else:
-        gutter = f"{style(bg_rgb=row_bg)} {RESET}"
+        gutter = f"{style(fg_rgb=DORIC['fg_shadow_subtle'], bg_rgb=row_bg, bold=True)}▏{RESET}"
 
     out: list[str] = []
     active_style = ""
