@@ -2253,6 +2253,7 @@ def run(
                 old_anchor_row = anchor_row
                 old_anchor_col = anchor_col
                 old_panel_rows = max(panel_rows, last_drawn_panel_rows)
+                clear_panel_area = True
 
                 term_size = tty_terminal_size(fd)
                 term_lines = term_size.lines
@@ -2268,6 +2269,7 @@ def run(
                 else:
                     next_start_row = initial_cursor_row
                     next_start_col = initial_cursor_col
+                    clear_panel_area = False
                     term_write(move_to(initial_cursor_row, initial_cursor_col))
                     term_flush()
 
@@ -2297,8 +2299,9 @@ def run(
                     next_anchor_col = 1
                     next_panel_rows = max(1, term_lines - next_anchor_row + 1)
 
-                for row in range(old_anchor_row, old_anchor_row + old_panel_rows):
-                    term_write(move_to(row, old_anchor_col) + CLEAR_TO_END)
+                if clear_panel_area:
+                    for row in range(old_anchor_row, old_anchor_row + old_panel_rows):
+                        term_write(move_to(row, old_anchor_col) + CLEAR_TO_END)
 
                 start_row = next_start_row
                 start_col = next_start_col
@@ -2307,8 +2310,9 @@ def run(
                 panel_rows = next_panel_rows
                 last_drawn_panel_rows = panel_rows
 
-                for row in range(anchor_row, anchor_row + panel_rows):
-                    term_write(move_to(row, anchor_col) + CLEAR_TO_END)
+                if clear_panel_area:
+                    for row in range(anchor_row, anchor_row + panel_rows):
+                        term_write(move_to(row, anchor_col) + CLEAR_TO_END)
                 term_write(move_to(anchor_row, anchor_col))
                 term_flush()
 
