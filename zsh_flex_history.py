@@ -2581,8 +2581,6 @@ def run(
                         status_message = "loading history..."
                     elif history_load_error and not results:
                         status_message = "history load failed"
-                    elif cache_key not in match_cache:
-                        status_message = "searching..."
                     if panel_rows < last_drawn_panel_rows:
                         for row in range(anchor_row + panel_rows, anchor_row + last_drawn_panel_rows):
                             term_write(move_to(row, anchor_col) + CLEAR_TO_END)
