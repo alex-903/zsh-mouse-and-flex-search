@@ -1831,7 +1831,7 @@ def draw_panel(
     return query_start, query_view_len, query_rows_used, results_visible
 
 
-def read_key(fd: int, timeout: float = 0.1) -> tuple[str, object]:
+def read_key(fd: int, timeout: Optional[float] = 0.1) -> tuple[str, object]:
     def read_escape_tail() -> bytes:
         # Read an escape sequence byte-by-byte so we do not over-read into
         # subsequent pasted payload bytes.
@@ -2609,7 +2609,10 @@ def run(
                     )
                     last_drawn_panel_rows = panel_rows
     
-                    ev, payload = read_key(fd, timeout=0.03)
+                    input_timeout: Optional[float] = 0.03
+                    if not history_loading and queued_search_key is None:
+                        input_timeout = None
+                    ev, payload = read_key(fd, timeout=input_timeout)
                     if ev == "timeout":
                         continue
     
