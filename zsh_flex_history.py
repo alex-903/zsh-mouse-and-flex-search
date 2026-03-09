@@ -1724,8 +1724,9 @@ def render_result_line(
     if suffix_text:
         if normal_style != active_style:
             out.append(normal_style)
-        out.append("  ")
+        out.append(" ")
         out.append(f"{style(fg_rgb=DORIC['fg_shadow_subtle'], bg_rgb=selected_bg if selected else row_bg)}[{suffix_text}]{RESET}")
+        out.append(f"{style(bg_rgb=selected_bg if selected else row_bg)} {RESET}")
     out.append(RESET)
     return gutter + "".join(out)
 
