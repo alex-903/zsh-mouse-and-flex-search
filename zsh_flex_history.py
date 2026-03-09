@@ -1680,7 +1680,7 @@ def render_result_line(
     if width <= 0:
         return ""
 
-    gutter_width = 2
+    gutter_width = 1
     suffix_width = text_display_width(suffix_text) + 4 if suffix_text else 0
     body_width = max(0, width - gutter_width - suffix_width)
     display_text = item.text.replace("\r", " ").replace("\n", " ")
@@ -1704,9 +1704,9 @@ def render_result_line(
         match_style = style(fg_rgb=match_fg, bg_rgb=row_bg, underline=True)
 
     if selected:
-        gutter = f"{style(fg_rgb=DORIC['fg_accent'], bg_rgb=DORIC['bg_accent'], bold=True)}▌{RESET} "
+        gutter = f"{style(fg_rgb=DORIC['fg_accent'], bg_rgb=DORIC['bg_accent'], bold=True)}▌{RESET}"
     else:
-        gutter = f"{style(fg_rgb=DORIC['border'])}│{RESET} "
+        gutter = f"{style(fg_rgb=DORIC['border'])}│{RESET}"
 
     out: list[str] = []
     active_style = ""
@@ -1749,7 +1749,7 @@ def draw_panel(
     anchor_col = max(1, anchor_col)
     render_width = max(1, width - anchor_col + 1)
     muted = style(fg_rgb=DORIC["fg_shadow_subtle"])
-    query_prefix = style(fg_rgb=DORIC["fg_shadow_intense"], bold=True)
+    query_lead_cols = 1
 
     lines: list[str] = []
     cursor_pos = max(0, min(cursor_pos, len(query)))
@@ -1786,7 +1786,7 @@ def draw_panel(
             query_parts.append(ch)
         if active_query_style:
             query_parts.append(RESET)
-        query_line = f"{query_prefix}› {RESET}" + "".join(query_parts)
+        query_line = " " + "".join(query_parts)
         if row == 0 and debug_note:
             room = max(0, render_width - seg_len)
             if room > 0:
@@ -1825,7 +1825,7 @@ def draw_panel(
     # Put cursor on query input field.
     cursor_row_abs, cursor_col = query_cursor_visual_position(query_rows, cursor_pos)
     cursor_row = min(query_rows_used - 1, max(0, cursor_row_abs - query_start))
-    cursor_col = max(0, min(cursor_col, render_width - 1))
+    cursor_col = max(0, min(cursor_col + query_lead_cols, render_width - 1))
     term_write(move_to(anchor_row + cursor_row, anchor_col + cursor_col))
     term_flush()
     return query_start, query_view_len, query_rows_used, results_visible
@@ -2169,7 +2169,7 @@ def run(
             # Otherwise, use the row below the prompt when possible.
             if inline_with_prompt:
                 anchor_row = max(1, start_row)
-                anchor_col = max(1, start_col)
+                anchor_col = max(1, start_col - 1)
                 panel_rows = max(1, term_lines - anchor_row + 1)
             elif space_below >= 1:
                 anchor_row = start_row + 1
@@ -2286,7 +2286,7 @@ def run(
 
                 if inline_with_prompt:
                     next_anchor_row = max(1, next_start_row)
-                    next_anchor_col = max(1, next_start_col)
+                    next_anchor_col = max(1, next_start_col - 1)
                     next_panel_rows = max(1, term_lines - next_anchor_row + 1)
                 elif space_below >= 1:
                     next_anchor_row = next_start_row + 1
