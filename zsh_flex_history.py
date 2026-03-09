@@ -1831,7 +1831,7 @@ def draw_panel(
     return query_start, query_view_len, query_rows_used, results_visible
 
 
-def read_key(fd: int) -> tuple[str, object]:
+def read_key(fd: int, timeout: float = 0.1) -> tuple[str, object]:
     def read_escape_tail() -> bytes:
         # Read an escape sequence byte-by-byte so we do not over-read into
         # subsequent pasted payload bytes.
@@ -1983,9 +1983,9 @@ def read_key(fd: int) -> tuple[str, object]:
         return bytes(buf).decode("utf-8", errors="replace")
 
     while True:
-        ready, _, _ = select.select([fd], [], [], 0.1)
+        ready, _, _ = select.select([fd], [], [], timeout)
         if not ready:
-            continue
+            return "timeout", None
         data = os.read(fd, 1)
         if not data:
             continue
@@ -2239,6 +2239,10 @@ def run(
             cache_order: list[str] = [""]
             cache_limit = 128
             history_loading = history_updates is not None and history_client is None
+            displayed_results = initial_results
+            displayed_matched_indices = initial_matched_indices
+            displayed_matched_count = initial_matched_count
+            displayed_total_count = initial_total_count
             mouse_selecting = False
             mouse_enabled = False
             last_left_click_time = 0.0
@@ -2246,6 +2250,92 @@ def run(
             last_left_click_col = -1
             left_click_count = 0
             last_drawn_panel_rows = panel_rows
+            search_requests: queue.Queue[Optional[tuple[str, Optional[list[int]], str]]] = queue.Queue()
+            search_updates: queue.Queue[
+                tuple[str, Optional[list[int]], list[MatchResult], Optional[int], int, bool]
+            ] = queue.Queue()
+            search_stop = threading.Event()
+            queued_search_key: Optional[str] = None
+
+            def search_candidates_for(query_text: str) -> Optional[list[int]]:
+                if history_client is not None:
+                    prefix = query_text[:-1]
+                    while prefix:
+                        cached = match_cache.get(prefix)
+                        if cached is not None and cached[0] is not None:
+                            return cached[0]
+                        prefix = prefix[:-1]
+                    return None
+                candidate_indices = all_indices
+                prefix = query_text[:-1]
+                while prefix:
+                    cached = match_cache.get(prefix)
+                    if cached is not None and cached[0] is not None:
+                        candidate_indices = cached[0]
+                        break
+                    prefix = prefix[:-1]
+                return candidate_indices
+
+            def run_search_request(
+                query_text: str,
+                candidate_indices: Optional[list[int]],
+                cwd_text: str,
+            ) -> tuple[Optional[list[int]], list[MatchResult], Optional[int], int, bool]:
+                search_error = False
+                if history_client is not None:
+                    remote = history_client.search_history(
+                        query_text,
+                        candidate_indices=candidate_indices,
+                        limit=MAX_RETURNED_RESULTS,
+                        cwd=cwd_text,
+                    )
+                    if remote is None:
+                        history_results = []
+                        matched_indices = None
+                        matched_count = None
+                        search_error = True
+                    else:
+                        history_results, matched_indices, matched_count = remote
+                    resolved_results = merge_runtime_and_rank(
+                        query_text,
+                        len(query_text),
+                        history_results,
+                        limit=MAX_RETURNED_RESULTS,
+                        cwd=current_cwd_path,
+                    )
+                else:
+                    resolved_results, matched_indices = search(
+                        query_text,
+                        history,
+                        cursor_pos=len(query_text),
+                        candidate_indices=candidate_indices,
+                        limit=MAX_RETURNED_RESULTS,
+                        cwd=current_cwd_path,
+                    )
+                    matched_count = len(matched_indices) if matched_indices is not None else None
+                total_count = len(resolved_results)
+                return matched_indices, resolved_results, matched_count, total_count, search_error
+
+            def search_worker() -> None:
+                while not search_stop.is_set():
+                    try:
+                        request = search_requests.get(timeout=0.05)
+                    except queue.Empty:
+                        continue
+                    if request is None:
+                        break
+                    query_text, candidate_indices, cwd_text = request
+                    matched_indices, resolved_results, matched_count, total_count, search_error = run_search_request(
+                        query_text,
+                        candidate_indices,
+                        cwd_text,
+                    )
+                    search_updates.put(
+                        (query_text, matched_indices, resolved_results, matched_count, total_count, search_error)
+                    )
+
+            search_thread = threading.Thread(target=search_worker, daemon=True)
+            search_thread.start()
 
             def refresh_anchor_from_cursor() -> None:
                 nonlocal start_row, start_col, anchor_row, anchor_col, panel_rows, last_drawn_panel_rows
@@ -2383,6 +2473,28 @@ def run(
 
             try:
                 while True:
+                    while True:
+                        try:
+                            (
+                                result_query,
+                                result_indices,
+                                result_results,
+                                result_count,
+                                result_total,
+                                result_error,
+                            ) = search_updates.get_nowait()
+                        except queue.Empty:
+                            break
+                        queued_search_key = None if queued_search_key == result_query else queued_search_key
+                        cache_put(result_query, result_indices, result_results, result_count, result_total)
+                        if result_error:
+                            history_load_error = True
+                        if result_query == query:
+                            displayed_matched_indices = result_indices
+                            displayed_results = result_results
+                            displayed_matched_count = result_count
+                            displayed_total_count = result_total
+
                     if history_updates is not None and history_client is None:
                         while True:
                             try:
@@ -2407,6 +2519,10 @@ def run(
                                     initial_total_count = max(len(initial_results), len(all_indices))
                                     match_cache = {"": (all_indices, initial_results, len(all_indices), initial_total_count)}
                                     cache_order = [""]
+                                    displayed_matched_indices = all_indices
+                                    displayed_results = initial_results
+                                    displayed_matched_count = len(all_indices)
+                                    displayed_total_count = initial_total_count
                                 history_loading = False
                             elif kind == "error":
                                 history_loading = False
@@ -2441,47 +2557,18 @@ def run(
                     cache_key = query
                     if cache_key in match_cache:
                         matched_indices, results, matched_count, total_count = match_cache[cache_key]
+                        displayed_matched_indices = matched_indices
+                        displayed_results = results
+                        displayed_matched_count = matched_count
+                        displayed_total_count = total_count
                     else:
-                        if history_client is not None:
-                            candidate_indices: Optional[list[int]] = None
-                            if query.startswith(last_query) and last_matched_indices is not None:
-                                candidate_indices = last_matched_indices
-                            remote = history_client.search_history(
-                                query,
-                                candidate_indices=candidate_indices,
-                                limit=MAX_RETURNED_RESULTS,
-                                cwd=current_cwd_text,
-                            )
-                            if remote is None:
-                                history_results = []
-                                matched_indices = None
-                                matched_count = None
-                                history_load_error = True
-                            else:
-                                history_results, matched_indices, matched_count = remote
-                                history_load_error = False
-                            results = merge_runtime_and_rank(
-                                query,
-                                len(query),
-                                history_results,
-                                limit=MAX_RETURNED_RESULTS,
-                                cwd=current_cwd_path,
-                            )
-                        else:
-                            candidate_indices = all_indices
-                            if query.startswith(last_query) and last_matched_indices is not None:
-                                candidate_indices = last_matched_indices
-                            results, matched_indices = search(
-                                query,
-                                history,
-                                cursor_pos=len(query),
-                                candidate_indices=candidate_indices,
-                                limit=MAX_RETURNED_RESULTS,
-                                cwd=current_cwd_path,
-                            )
-                            matched_count = len(matched_indices) if matched_indices is not None else None
-                        total_count = len(results)
-                        cache_put(cache_key, matched_indices, results, matched_count, total_count)
+                        if queued_search_key != cache_key:
+                            search_requests.put((cache_key, search_candidates_for(cache_key), current_cwd_text))
+                            queued_search_key = cache_key
+                        matched_indices = displayed_matched_indices
+                        results = displayed_results
+                        matched_count = displayed_matched_count
+                        total_count = displayed_total_count
                     last_query = query
                     last_matched_indices = matched_indices
                     status_message = ""
@@ -2494,6 +2581,8 @@ def run(
                         status_message = "loading history..."
                     elif history_load_error and not results:
                         status_message = "history load failed"
+                    elif cache_key not in match_cache:
+                        status_message = "searching..."
                     if panel_rows < last_drawn_panel_rows:
                         for row in range(anchor_row + panel_rows, anchor_row + last_drawn_panel_rows):
                             term_write(move_to(row, anchor_col) + CLEAR_TO_END)
@@ -2522,7 +2611,9 @@ def run(
                     )
                     last_drawn_panel_rows = panel_rows
     
-                    ev, payload = read_key(fd)
+                    ev, payload = read_key(fd, timeout=0.03)
+                    if ev == "timeout":
+                        continue
     
                     if ev == "quit":
                         clear_panel_and_restore_cursor()
@@ -2796,6 +2887,9 @@ def run(
             except KeyboardInterrupt:
                 clear_panel_and_restore_cursor()
                 return None
+            finally:
+                search_stop.set()
+                search_requests.put(None)
 
             clear_panel_and_restore_cursor()
             return chosen
