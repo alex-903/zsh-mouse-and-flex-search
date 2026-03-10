@@ -354,6 +354,22 @@ def default_custom_history_path() -> Path:
     return Path(__file__).resolve().parent / "history.db"
 
 
+def parse_history_length_arg(raw: str) -> int:
+    value = raw.strip().lower().replace("_", "")
+    match = re.fullmatch(r"(\d+)([km]?)", value)
+    if match is None:
+        raise ValueError(f"invalid history length: {raw!r}")
+    count = int(match.group(1))
+    suffix = match.group(2)
+    if suffix == "k":
+        count *= 1_000
+    elif suffix == "m":
+        count *= 1_000_000
+    if count <= 0:
+        raise ValueError("history length must be positive")
+    return count
+
+
 def ensure_custom_history_file(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(path) as conn:
@@ -472,6 +488,30 @@ def append_custom_history_entry(path: Path, command: str, cwd: str, timestamp: s
     except (OSError, sqlite3.Error):
         return False
     return True
+
+
+def trim_custom_history(path: Path, max_entries: int) -> None:
+    if max_entries <= 0:
+        return
+    ensure_custom_history_file(path)
+    with sqlite3.connect(path) as conn:
+        row = conn.execute("SELECT COUNT(*) FROM custom_history").fetchone()
+        total_entries = row[0] if isinstance(row, tuple) and row and isinstance(row[0], int) else 0
+        if total_entries <= max_entries:
+            return
+        conn.execute(
+            """
+            DELETE FROM custom_history
+            WHERE id NOT IN (
+                SELECT id
+                FROM custom_history
+                ORDER BY id DESC
+                LIMIT ?
+            )
+            """,
+            (max_entries,),
+        )
+        conn.commit()
 
 
 def spawn_history_loader(path: Path) -> queue.Queue[tuple[str, object]]:
@@ -1189,6 +1229,7 @@ def launch_history_daemon(
     history_path: Path,
     socket_path: Path,
     *,
+    history_length: int,
     use_custom_history: bool = False,
 ) -> bool:
     try:
@@ -1204,6 +1245,8 @@ def launch_history_daemon(
         str(history_path),
         "--socket-path",
         str(socket_path),
+        "--history-length",
+        str(history_length),
     ]
     if use_custom_history:
         cmd.append("--use-custom-history")
@@ -1229,12 +1272,14 @@ class HistoryDaemonClient:
         script_path: Path,
         *,
         debug: bool = False,
+        history_length: int = 10_000,
         use_custom_history: bool = False,
     ) -> None:
         self.socket_path = socket_path
         self.history_path = history_path
         self.script_path = script_path
         self.debug = debug
+        self.history_length = history_length
         self.use_custom_history = use_custom_history
 
     def ensure_running(self) -> bool:
@@ -1256,6 +1301,7 @@ class HistoryDaemonClient:
             self.script_path,
             self.history_path,
             self.socket_path,
+            history_length=self.history_length,
             use_custom_history=self.use_custom_history,
         ):
             daemon_debug_log(self.debug, "failed to launch daemon process")
@@ -1393,13 +1439,18 @@ def run_history_daemon(
     socket_path: Path,
     *,
     debug: bool = False,
+    history_length: int = 10_000,
     use_custom_history: bool = False,
 ) -> int:
     if use_custom_history:
         try:
             ensure_custom_history_file(history_path)
+            trim_custom_history(history_path, history_length)
         except OSError as exc:
             print(f"zsh_flex_history daemon: failed to initialize custom history: {exc}", file=sys.stderr)
+            return 1
+        except sqlite3.Error as exc:
+            print(f"zsh_flex_history daemon: failed to trim custom history: {exc}", file=sys.stderr)
             return 1
     history = load_history_source(history_path, use_custom_history=use_custom_history)
     signature = history_file_signature(history_path)
@@ -2914,6 +2965,11 @@ def main() -> int:
     parser.add_argument("--socket-path", default="", help=SUPPRESS)
     parser.add_argument("--history-file", default="", help=SUPPRESS)
     parser.add_argument(
+        "--history-length",
+        default="10k",
+        help="Maximum SQLite history rows to keep when the daemon starts (for example: 10000 or 10k).",
+    )
+    parser.add_argument(
         "--no-shared-daemon",
         action="store_true",
         help="Error out because local fallback mode is disabled.",
@@ -2929,6 +2985,11 @@ def main() -> int:
         help="Use local SQLite history at ./history.db (command, cwd, timestamp).",
     )
     args = parser.parse_args()
+    try:
+        history_length = parse_history_length_arg(str(args.history_length))
+    except ValueError as exc:
+        print(f"zsh_flex_history: {exc}", file=sys.stderr)
+        return 2
 
     if args.use_custom_history:
         history_path = default_custom_history_path()
@@ -2951,6 +3012,7 @@ def main() -> int:
             history_path,
             socket_path,
             debug=args.debug_daemon,
+            history_length=history_length,
             use_custom_history=args.use_custom_history,
         )
 
@@ -2962,6 +3024,7 @@ def main() -> int:
             history_path,
             Path(__file__).resolve(),
             debug=args.debug_daemon,
+            history_length=history_length,
             use_custom_history=args.use_custom_history,
         )
         if daemon_client.ensure_running():
