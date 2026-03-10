@@ -2472,6 +2472,8 @@ def run(
 
                 start_row = next_start_row
                 start_col = next_start_col
+                initial_cursor_row = start_row
+                initial_cursor_col = start_col
                 anchor_row = next_anchor_row
                 anchor_col = next_anchor_col
                 panel_rows = next_panel_rows
@@ -2619,6 +2621,8 @@ def run(
                             term_write(move_to(term_lines, 1) + ("\n" * extra_rows))
                             term_flush()
                             start_row = max(1, start_row - extra_rows)
+                            initial_cursor_row = start_row
+                            initial_cursor_col = start_col
                             anchor_row = max(1, anchor_row - extra_rows)
                             max_panel_rows = max(1, term_lines - anchor_row + 1)
                     panel_rows = min(desired_panel_rows, max_panel_rows)
