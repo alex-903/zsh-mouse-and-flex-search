@@ -701,6 +701,17 @@ def command_token_for_query(query: str) -> Optional[str]:
     return tokens[0]
 
 
+def shell_words_for_matching(text: str) -> list[str]:
+    stripped = text.strip().lower()
+    if not stripped:
+        return []
+    try:
+        tokens = shlex.split(stripped)
+    except ValueError:
+        tokens = stripped.split()
+    return [token for token in tokens if token]
+
+
 def path_completion_replacements(
     query: str,
     cursor_pos: int,
@@ -1062,27 +1073,29 @@ def apply_prefix_priority(
     if not results:
         return results
 
-    query_prefix = query.lstrip().lower()
-    prefix_lengths: list[int] = []
-    max_prefix_len = 0
-    if query_prefix:
+    query_words = shell_words_for_matching(query)
+    prefix_word_counts: list[int] = []
+    max_prefix_words = 0
+    if query_words:
         for item in results:
             text_lower = item.text_lower if item.text_lower is not None else item.text.lower()
-            match_len = 0
-            max_check = min(len(query_prefix), len(text_lower))
-            while match_len < max_check and query_prefix[match_len] == text_lower[match_len]:
-                match_len += 1
-            prefix_lengths.append(match_len)
-            if match_len > max_prefix_len:
-                max_prefix_len = match_len
+            candidate_words = shell_words_for_matching(text_lower)
+            matched_words = 0
+            for query_word, candidate_word in zip(query_words, candidate_words):
+                if not candidate_word.startswith(query_word):
+                    break
+                matched_words += 1
+            prefix_word_counts.append(matched_words)
+            if matched_words > max_prefix_words:
+                max_prefix_words = matched_words
     else:
-        prefix_lengths = [0] * len(results)
+        prefix_word_counts = [0] * len(results)
 
-    if max_prefix_len > 0:
+    if max_prefix_words > 0:
         tier_prefix: list[MatchResult] = []
         tier_rest: list[MatchResult] = []
-        for item, prefix_len in zip(results, prefix_lengths):
-            if prefix_len == max_prefix_len:
+        for item, prefix_word_count in zip(results, prefix_word_counts):
+            if prefix_word_count == max_prefix_words:
                 tier_prefix.append(item)
             else:
                 tier_rest.append(item)
