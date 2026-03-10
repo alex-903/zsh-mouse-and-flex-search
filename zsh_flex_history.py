@@ -1864,6 +1864,8 @@ def draw_panel(
         lines.append(query_line)
 
     effective_total = max(len(results), total_count or 0)
+    top_remaining = max(0, effective_total - results_visible)
+    use_visible_total_for_more = top_remaining <= 97
     for i in range(results_visible):
         idx = offset + i
         if idx >= len(results):
@@ -1875,6 +1877,8 @@ def draw_panel(
                 lines.append("")
             continue
         remaining = max(0, effective_total - (offset + results_visible))
+        if use_visible_total_for_more:
+            remaining = max(0, len(results) - (offset + results_visible))
         is_last_visible_row = i == (results_visible - 1)
         more_text = f"{remaining} more" if (is_last_visible_row and remaining > 0) else ""
         base_line = render_result_line(
