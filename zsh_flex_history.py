@@ -1775,7 +1775,8 @@ def render_result_line(
     out: list[str] = []
     active_style = ""
     for i, ch in enumerate(text):
-        target_style = match_style if i in pos_set else normal_style
+        is_match_char = i in pos_set and ch != " "
+        target_style = match_style if is_match_char else normal_style
         if target_style != active_style:
             out.append(target_style if target_style else RESET)
             active_style = target_style
