@@ -1616,6 +1616,10 @@ def text_display_width(text: str) -> int:
     return sum(char_display_width(ch) for ch in text)
 
 
+def query_text_render_width(render_width: int, lead_cols: int = 1) -> int:
+    return max(1, render_width - max(0, lead_cols))
+
+
 def query_window(query: str, cursor_pos: int, available: int) -> tuple[int, str]:
     if available <= 0:
         return 0, ""
@@ -1818,16 +1822,17 @@ def draw_panel(
     render_width = max(1, width - anchor_col + 1)
     muted = style(fg_rgb=DORIC["fg_shadow_subtle"])
     query_lead_cols = 1
+    query_width = query_text_render_width(render_width, query_lead_cols)
 
     lines: list[str] = []
     cursor_pos = max(0, min(cursor_pos, len(query)))
     query_start, query_view_len, query_rows_used, results_visible = wrapped_query_layout(
         query,
         cursor_pos,
-        render_width,
+        query_width,
         panel_rows,
     )
-    query_rows = build_query_visual_rows(query, render_width)
+    query_rows = build_query_visual_rows(query, query_width)
     visible_query_rows = query_rows[query_start : query_start + query_rows_used]
     sel = selection_bounds(sel_anchor, sel_end)
     syntax_tokens = highlight_tokens(query)
@@ -1856,7 +1861,7 @@ def draw_panel(
             query_parts.append(RESET)
         query_line = " " + "".join(query_parts)
         if row == 0 and debug_note:
-            room = max(0, render_width - seg_len)
+            room = max(0, render_width - (seg_len + query_lead_cols))
             if room > 0:
                 note_text = debug_note[: max(0, room - 1)]
                 if note_text:
@@ -2604,7 +2609,8 @@ def run(
                     width = term_size.columns
                     term_lines = term_size.lines
                     render_width = max(1, width - max(1, anchor_col) + 1)
-                    required_query_rows = max(1, len(build_query_visual_rows(query, render_width)))
+                    query_width = query_text_render_width(render_width)
+                    required_query_rows = max(1, len(build_query_visual_rows(query, query_width)))
                     desired_panel_rows = max(min_panel_rows, required_query_rows + min_result_rows)
                     max_panel_rows = max(1, term_lines - anchor_row + 1)
                     if desired_panel_rows > max_panel_rows and anchor_row > 1:
@@ -2622,7 +2628,7 @@ def run(
                     _qs, _qvl, _qru, layout_results_visible = wrapped_query_layout(
                         query,
                         cursor_pos,
-                        render_width,
+                        query_width,
                         panel_rows,
                     )
                     visible = max(1, layout_results_visible)
@@ -2898,7 +2904,7 @@ def run(
                             click_col = max(0, mx - anchor_col - 1)
                             click_pos = query_pos_from_visual(
                                 query,
-                                render_width,
+                                query_width,
                                 query_start,
                                 click_row,
                                 click_col,
