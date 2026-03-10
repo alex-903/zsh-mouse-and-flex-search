@@ -2875,7 +2875,7 @@ def run(
                         # Query line interactions (including wrapped rows).
                         if anchor_row <= my < (anchor_row + query_rows_used):
                             click_row = my - anchor_row
-                            click_col = max(0, max(anchor_col, mx) - anchor_col)
+                            click_col = max(0, mx - anchor_col - 1)
                             click_pos = query_pos_from_visual(
                                 query,
                                 render_width,
