@@ -2381,7 +2381,7 @@ def run(
                         cwd=current_cwd_path,
                     )
                     matched_count = len(matched_indices) if matched_indices is not None else None
-                total_count = len(resolved_results)
+                total_count = max(len(resolved_results), matched_count or 0)
                 return matched_indices, resolved_results, matched_count, total_count, search_error
 
             def search_worker() -> None:
