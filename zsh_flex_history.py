@@ -556,8 +556,10 @@ def flex_match(query: str, candidate: str, *, candidate_lower: Optional[str] = N
     if not query:
         return MatchResult(candidate, 0, [], text_lower=candidate_lower or candidate.lower())
 
-    q = query.lower()
+    q = "".join(ch for ch in query.lower() if not ch.isspace())
     c = candidate_lower if candidate_lower is not None else candidate.lower()
+    if not q:
+        return MatchResult(candidate, 0, [], text_lower=c)
 
     positions: list[int] = []
     at = 0
@@ -593,7 +595,7 @@ def flex_match(query: str, candidate: str, *, candidate_lower: Optional[str] = N
 
     span = positions[-1] - positions[0] + 1
     start_bonus = max(0, 30 - positions[0])
-    compact_bonus = max(0, 20 - (span - len(query)))
+    compact_bonus = max(0, 20 - (span - len(q)))
 
     score += contiguous + boundary_bonus + start_bonus + compact_bonus
     score -= gap_penalty
