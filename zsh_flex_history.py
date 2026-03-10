@@ -1017,7 +1017,7 @@ def prefer_current_cwd(
 
 def ordered_query_word_positions(query: str, text_lower: str) -> Optional[list[int]]:
     words = query.lower().split()
-    if len(words) < 2:
+    if not words:
         return None
 
     at = 0
