@@ -2705,6 +2705,8 @@ def run(
                         chosen = query
                         break
                     if ev == "tab":
+                        if not query:
+                            refresh_anchor_from_cursor()
                         if 0 <= selected < len(results):
                             query = results[selected].text
                             cursor_pos = len(query)
@@ -2759,6 +2761,8 @@ def run(
                         selected = min(max(0, len(results) - 1), selected + visible)
                         continue
                     if ev == "backspace":
+                        if not query:
+                            refresh_anchor_from_cursor()
                         sel = selection_bounds(sel_anchor, sel_end)
                         if sel:
                             query = query[: sel[0]] + query[sel[1] :]
