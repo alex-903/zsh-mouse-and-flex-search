@@ -1154,12 +1154,12 @@ def search(
         history,
         candidate_indices=candidate_indices,
     )
-    results = merge_runtime_and_rank(
+    current_cwd = normalize_cwd_value(str(cwd)) if cwd is not None else None
+    results = apply_prefix_priority(
         query,
-        cursor_pos,
         history_results,
         limit=limit,
-        cwd=cwd,
+        current_cwd=current_cwd,
     )
     return results, matched_indices
 
@@ -1818,6 +1818,12 @@ def draw_panel(
     render_width = max(1, width - anchor_col + 1)
     result_anchor_col = max(1, anchor_col - 1)
     result_render_width = max(1, width - result_anchor_col + 1)
+
+    def draw_col_for_row(row_offset: int) -> int:
+        if row_offset == 0:
+            return anchor_col
+        return result_anchor_col
+
     muted = style(fg_rgb=DORIC["fg_shadow_subtle"])
     visual_cursor_style = style(bg=7, bold=True)
     query_lead_cols = 1
@@ -1918,7 +1924,8 @@ def draw_panel(
         result_lines.append(base_line)
 
     for i, line in enumerate(query_lines[:query_rows_used]):
-        term_write(move_to(anchor_row + i, anchor_col) + CLEAR_TO_END + line)
+        draw_col = draw_col_for_row(i)
+        term_write(move_to(anchor_row + i, draw_col) + CLEAR_TO_END + line)
     remaining_rows = max(0, panel_rows - query_rows_used)
     for i, line in enumerate(result_lines[:remaining_rows]):
         term_write(move_to(anchor_row + query_rows_used + i, result_anchor_col) + CLEAR_TO_END + line)
@@ -2201,7 +2208,6 @@ def run(
     tty_out_file = None
     current_cwd_text = normalize_cwd_value(os.getcwd())
     current_cwd_path = Path(current_cwd_text)
-    prime_directory_listing_cache(current_cwd_path)
     fd: Optional[int] = None
     for tty_path in ("/dev/tty", os.ctermid()):
         try:
@@ -2281,8 +2287,12 @@ def run(
                 anchor_row = max(1, start_row)
                 anchor_col = 1
                 panel_rows = max(1, term_lines - anchor_row + 1)
+            def panel_clear_col(row: int, current_anchor_row: int, current_anchor_col: int) -> int:
+                if inline_with_prompt and row == current_anchor_row:
+                    return current_anchor_col
+                return max(1, current_anchor_col - 1)
             for row in range(anchor_row, anchor_row + panel_rows):
-                term_write(move_to(row, anchor_col) + CLEAR_TO_END)
+                term_write(move_to(row, panel_clear_col(row, anchor_row, anchor_col)) + CLEAR_TO_END)
             term_write(move_to(anchor_row, anchor_col))
             term_flush()
 
@@ -2311,12 +2321,11 @@ def run(
                     history_load_error = True
                 else:
                     history_matches, initial_matched_indices, initial_matched_count = loaded
-                    initial_results = merge_runtime_and_rank(
+                    initial_results = apply_prefix_priority(
                         "",
-                        cursor_pos,
                         history_matches,
                         limit=MAX_RETURNED_RESULTS,
-                        cwd=current_cwd_path,
+                        current_cwd=current_cwd_text or None,
                     )
                     history_load_error = False
             else:
@@ -2398,12 +2407,11 @@ def run(
                         search_error = True
                     else:
                         history_results, matched_indices, matched_count = remote
-                    resolved_results = merge_runtime_and_rank(
+                    resolved_results = apply_prefix_priority(
                         query_text,
-                        len(query_text),
                         history_results,
                         limit=MAX_RETURNED_RESULTS,
-                        cwd=current_cwd_path,
+                        current_cwd=current_cwd_text or None,
                     )
                 else:
                     resolved_results, matched_indices = search(
@@ -2493,7 +2501,7 @@ def run(
 
                 if clear_panel_area:
                     for row in range(old_anchor_row, old_anchor_row + old_panel_rows):
-                        term_write(move_to(row, old_anchor_col) + CLEAR_TO_END)
+                        term_write(move_to(row, panel_clear_col(row, old_anchor_row, old_anchor_col)) + CLEAR_TO_END)
 
                 start_row = next_start_row
                 start_col = next_start_col
@@ -2506,14 +2514,14 @@ def run(
 
                 if clear_panel_area:
                     for row in range(anchor_row, anchor_row + panel_rows):
-                        term_write(move_to(row, anchor_col) + CLEAR_TO_END)
+                        term_write(move_to(row, panel_clear_col(row, anchor_row, anchor_col)) + CLEAR_TO_END)
                 term_write(move_to(anchor_row, anchor_col))
                 term_flush()
 
             def clear_panel_and_restore_cursor() -> None:
                 # Clear panel content so repeated invocations always start clean.
                 for row in range(anchor_row, anchor_row + max(panel_rows, last_drawn_panel_rows)):
-                    term_write(move_to(row, anchor_col) + CLEAR_TO_END)
+                    term_write(move_to(row, panel_clear_col(row, anchor_row, anchor_col)) + CLEAR_TO_END)
                 # Restore cursor to the exact prompt position captured at invocation start.
                 term_write(move_to(start_row, start_col))
                 term_flush()
@@ -2691,7 +2699,7 @@ def run(
                         status_message = "history load failed"
                     if panel_rows < last_drawn_panel_rows:
                         for row in range(anchor_row + panel_rows, anchor_row + last_drawn_panel_rows):
-                            term_write(move_to(row, anchor_col) + CLEAR_TO_END)
+                            term_write(move_to(row, panel_clear_col(row, anchor_row, anchor_col)) + CLEAR_TO_END)
                     if selected >= len(results):
                         selected = max(0, len(results) - 1)
                     if selected < offset:
