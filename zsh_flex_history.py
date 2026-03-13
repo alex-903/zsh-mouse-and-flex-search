@@ -204,7 +204,7 @@ def style(
 
 RESET = "\x1b[0m"
 QUERY_SELECTION_BG = style(fg_rgb=DORIC["fg_blue"], bg_rgb=DORIC["bg_blue"])
-RESULT_WIDTH_ANIMATION_STEP_SECONDS = 1.0 / 60.0
+RESULT_WIDTH_ANIMATION_STEP_SECONDS = 1.0 / 120.0
 CLEAR_LINE = "\x1b[2K"
 CLEAR_TO_END = "\x1b[K"
 HIDE_CURSOR = "\x1b[?25l"
