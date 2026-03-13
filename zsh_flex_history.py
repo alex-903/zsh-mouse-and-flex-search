@@ -95,6 +95,59 @@ class HistoryEntry:
     timestamp: Optional[str] = None
 
 
+@dataclass(frozen=True)
+class DirectoryListingEntry:
+    name: str
+    path: Path
+    is_dir: bool
+
+
+_DIRECTORY_LISTING_CACHE: dict[Path, tuple[DirectoryListingEntry, ...]] = {}
+_DIRECTORY_LISTING_CACHE_ORDER: list[Path] = []
+_DIRECTORY_LISTING_CACHE_LIMIT = 128
+_DIRECTORY_LISTING_CACHE_LOCK = threading.Lock()
+
+
+def cached_directory_listing(directory: Path) -> Optional[tuple[DirectoryListingEntry, ...]]:
+    try:
+        cache_key = directory.resolve()
+    except OSError:
+        return None
+
+    with _DIRECTORY_LISTING_CACHE_LOCK:
+        cached = _DIRECTORY_LISTING_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+
+    try:
+        entries: list[DirectoryListingEntry] = []
+        with os.scandir(cache_key) as scanned_entries:
+            for entry in scanned_entries:
+                try:
+                    is_dir = entry.is_dir(follow_symlinks=False)
+                except OSError:
+                    continue
+                entries.append(DirectoryListingEntry(entry.name, Path(entry.path), is_dir))
+    except OSError:
+        return None
+
+    cached_entries = tuple(entries)
+    with _DIRECTORY_LISTING_CACHE_LOCK:
+        existing = _DIRECTORY_LISTING_CACHE.get(cache_key)
+        if existing is not None:
+            return existing
+        if len(_DIRECTORY_LISTING_CACHE_ORDER) >= _DIRECTORY_LISTING_CACHE_LIMIT:
+            oldest = _DIRECTORY_LISTING_CACHE_ORDER.pop(0)
+            _DIRECTORY_LISTING_CACHE.pop(oldest, None)
+        _DIRECTORY_LISTING_CACHE_ORDER.append(cache_key)
+        _DIRECTORY_LISTING_CACHE[cache_key] = cached_entries
+    return cached_entries
+
+
+def prime_directory_listing_cache(directory: Path) -> None:
+    cached_directory_listing(directory)
+
+
 def base16_ansi(name: str) -> int:
     return BASE16_TO_ANSI[name]
 
@@ -758,7 +811,8 @@ def path_completion_replacements(
         base_dir = (working_dir / rel_parent).resolve()
         display_prefix = parent_part
 
-    if not base_dir.exists() or not base_dir.is_dir():
+    cached_entries = cached_directory_listing(base_dir)
+    if cached_entries is None:
         return []
 
     replacements: list[str] = []
@@ -779,30 +833,25 @@ def path_completion_replacements(
         replacement = query[:start] + format_token(token) + query[end:]
         replacements.append(replacement)
 
-    try:
-        with os.scandir(base_dir) as entries:
-            for entry in entries:
-                if entry.name.startswith(".") and not name_prefix.startswith("."):
-                    continue
-                if not entry.name.startswith(name_prefix):
-                    continue
-                if dirs_only and not entry.is_dir(follow_symlinks=False):
-                    continue
-                suggested_piece = entry.name
-                is_dir = entry.is_dir(follow_symlinks=False)
-                if is_dir:
-                    suggested_piece += "/"
-                if display_prefix == "":
-                    completed_token = suggested_piece
-                elif display_prefix == ".":
-                    completed_token = "./" + suggested_piece
-                elif display_prefix == "/":
-                    completed_token = "/" + suggested_piece
-                else:
-                    completed_token = display_prefix.rstrip("/") + "/" + suggested_piece
-                direct_matches.append((completed_token, Path(entry.path), is_dir))
-    except OSError:
-        return []
+    for entry in cached_entries:
+        if entry.name.startswith(".") and not name_prefix.startswith("."):
+            continue
+        if not entry.name.startswith(name_prefix):
+            continue
+        if dirs_only and not entry.is_dir:
+            continue
+        suggested_piece = entry.name
+        if entry.is_dir:
+            suggested_piece += "/"
+        if display_prefix == "":
+            completed_token = suggested_piece
+        elif display_prefix == ".":
+            completed_token = "./" + suggested_piece
+        elif display_prefix == "/":
+            completed_token = "/" + suggested_piece
+        else:
+            completed_token = display_prefix.rstrip("/") + "/" + suggested_piece
+        direct_matches.append((completed_token, entry.path, entry.is_dir))
 
     direct_matches.sort(key=lambda item: item[0])
     for completed_token, _, _ in direct_matches:
@@ -813,77 +862,16 @@ def path_completion_replacements(
     dir_matches = [item for item in direct_matches if item[2]]
     if len(dir_matches) == 1:
         matched_token, matched_path, _ = dir_matches[0]
-        try:
-            child_dirs: list[str] = []
-            with os.scandir(matched_path) as child_entries:
-                for child in child_entries:
-                    if not child.is_dir(follow_symlinks=False):
-                        continue
-                    child_dirs.append(child.name)
-            child_dirs.sort()
+        child_entries = cached_directory_listing(matched_path)
+        if child_entries is not None:
+            child_dirs = sorted(child.name for child in child_entries if child.is_dir)
             for child_name in child_dirs:
                 descendant_token = matched_token.rstrip("/") + "/" + child_name + "/"
                 push_replacement(descendant_token)
                 if len(replacements) >= limit:
                     break
-        except OSError:
-            pass
 
     return replacements
-
-
-_PATH_COMMANDS_CACHE: Optional[list[str]] = None
-
-
-def path_commands() -> list[str]:
-    global _PATH_COMMANDS_CACHE
-    if _PATH_COMMANDS_CACHE is not None:
-        return _PATH_COMMANDS_CACHE
-
-    commands: set[str] = set()
-    for path_dir in os.environ.get("PATH", "").split(os.pathsep):
-        if not path_dir:
-            continue
-        try:
-            with os.scandir(path_dir) as entries:
-                for entry in entries:
-                    try:
-                        if entry.is_file() and os.access(entry.path, os.X_OK):
-                            commands.add(entry.name)
-                    except OSError:
-                        continue
-        except OSError:
-            continue
-    _PATH_COMMANDS_CACHE = sorted(commands)
-    return _PATH_COMMANDS_CACHE
-
-
-def command_completion_replacements(query: str, cursor_pos: int, *, limit: int = 64) -> list[str]:
-    stripped = query.lstrip()
-    if not stripped:
-        return []
-    leading_ws = len(query) - len(stripped)
-    first_end = leading_ws
-    while first_end < len(query) and not query[first_end].isspace():
-        first_end += 1
-    if not (leading_ws <= cursor_pos <= first_end):
-        return []
-
-    prefix = query[leading_ws:first_end]
-    bare_prefix = strip_enclosing_quotes(prefix)
-    if not bare_prefix:
-        return []
-
-    replacements: list[str] = []
-    for cmd in path_commands():
-        if not cmd.startswith(bare_prefix):
-            continue
-        replacement = query[:leading_ws] + cmd + query[first_end:]
-        replacements.append(replacement)
-        if len(replacements) >= limit:
-            break
-    return replacements
-
 
 def cursor_in_first_token(query: str, cursor_pos: int) -> bool:
     stripped = query.lstrip()
@@ -920,7 +908,6 @@ def resolve_runtime_matches(
             limit=limit,
         )
     )
-    runtime_candidates.extend(command_completion_replacements(query, cursor_pos, limit=limit))
 
     seen: set[str] = set()
     resolved: list[MatchResult] = []
@@ -2191,6 +2178,7 @@ def run(
     tty_out_file = None
     current_cwd_text = normalize_cwd_value(os.getcwd())
     current_cwd_path = Path(current_cwd_text)
+    prime_directory_listing_cache(current_cwd_path)
     fd: Optional[int] = None
     for tty_path in ("/dev/tty", os.ctermid()):
         try:
