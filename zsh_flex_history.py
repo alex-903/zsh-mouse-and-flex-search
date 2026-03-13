@@ -49,30 +49,30 @@ BASE16_TO_ANSI = {
 }
 
 DORIC = {
-    "cursor": "#2266bb",
-    "bg_main": "#ffffff",
-    "fg_main": "#000000",
-    "border": "#b0b0b0",
-    "bg_shadow_subtle": "#efeff2",
-    "fg_shadow_subtle": "#5a6268",
-    "bg_neutral": "#dbdce1",
-    "fg_neutral": "#424d53",
-    "bg_shadow_intense": "#a0bcd0",
-    "fg_shadow_intense": "#213067",
-    "bg_accent": "#d8f1f3",
-    "fg_accent": "#084092",
-    "fg_red": "#a01010",
-    "fg_green": "#106710",
-    "fg_yellow": "#60400f",
-    "fg_blue": "#103077",
-    "fg_magenta": "#700d50",
-    "fg_cyan": "#005355",
-    "bg_red": "#f0c4c4",
-    "bg_green": "#c0e8c2",
-    "bg_yellow": "#f0f0b0",
-    "bg_blue": "#c4cfe8",
-    "bg_magenta": "#eec2e6",
-    "bg_cyan": "#c1ebe4",
+    "cursor": "#205798",
+    "bg_main": "#fcf0e5",
+    "fg_main": "#40282e",
+    "border": "#c3a8bf",
+    "bg_shadow_subtle": "#efe4db",
+    "fg_shadow_subtle": "#8f5854",
+    "bg_neutral": "#e6d5d0",
+    "fg_neutral": "#514250",
+    "bg_shadow_intense": "#fcb894",
+    "fg_shadow_intense": "#a02016",
+    "bg_accent": "#c8f0e3",
+    "fg_accent": "#085078",
+    "fg_red": "#a02610",
+    "fg_green": "#006940",
+    "fg_yellow": "#753800",
+    "fg_blue": "#183182",
+    "fg_magenta": "#820145",
+    "fg_cyan": "#025763",
+    "bg_red": "#ffbca7",
+    "bg_green": "#b2efd8",
+    "bg_yellow": "#e6e294",
+    "bg_blue": "#baceef",
+    "bg_magenta": "#e2c1e0",
+    "bg_cyan": "#c0e6f9",
 }
 
 
@@ -1769,7 +1769,7 @@ def render_result_line(
     else:
         normal_style = RESET + style(fg_rgb=row_fg, bg_rgb=row_bg)
     if selected:
-        match_style = RESET + style(fg_rgb=selected_fg, bg_rgb=selected_bg, bold=True, underline=True)
+        match_style = RESET + style(fg_rgb=match_fg, bg_rgb=selected_bg, bold=True, underline=True)
     else:
         match_style = style(fg_rgb=match_fg, bg_rgb=row_bg, underline=True)
 
@@ -1885,14 +1885,14 @@ def draw_panel(
         if use_visible_total_for_more:
             remaining = max(0, len(results) - (offset + results_visible))
         is_last_visible_row = i == (results_visible - 1)
-        more_text = f"{remaining} more" if (is_last_visible_row and remaining > 0) else ""
+        # more_text = f"{remaining} more" if (is_last_visible_row and remaining > 0) else ""
         base_line = render_result_line(
             results[idx],
             idx == selected,
             render_width,
             query=query,
             unselected_white=True,
-            suffix_text=more_text,
+            suffix_text="",
         )
         lines.append(base_line)
 
@@ -2752,9 +2752,13 @@ def run(
                         select_all_query()
                         continue
                     if ev == "up":
+                        if not query:
+                            refresh_anchor_from_cursor()
                         selected = max(0, selected - 1)
                         continue
                     if ev == "down":
+                        if not query:
+                            refresh_anchor_from_cursor()
                         selected = min(max(0, len(results) - 1), selected + 1)
                         continue
                     if ev == "pgup":
