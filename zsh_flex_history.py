@@ -212,6 +212,7 @@ ENABLE_MOUSE = "\x1b[?1000h\x1b[?1002h\x1b[?1006h"
 DISABLE_MOUSE = "\x1b[?1000l\x1b[?1002l\x1b[?1006l"
 MAX_RETURNED_RESULTS = 100
 FIXED_MATCH_TEXT_WIDTH = 30
+RESULT_PREFIX_WIDTH = 2
 
 TERM_OUT = sys.stdout
 
@@ -1751,7 +1752,7 @@ def render_result_line(
     if width <= 0:
         return ""
 
-    gutter_width = 1
+    gutter_width = RESULT_PREFIX_WIDTH
     suffix_width = text_display_width(suffix_text) + 4 if suffix_text else 0
     body_width = max(0, width - gutter_width - suffix_width)
     display_text = item.text.replace("\r", " ").replace("\n", " ")
@@ -1773,9 +1774,9 @@ def render_result_line(
         match_style = style(fg_rgb=match_fg, underline=True)
 
     if selected:
-        gutter = f"{style(fg_rgb=selected_fg, bold=True)}▶{RESET}"
+        gutter = f"{style(fg_rgb=selected_fg, bold=True)}▶{RESET} "
     else:
-        gutter = " "
+        gutter = "  "
 
     out: list[str] = []
     active_style = ""
@@ -1819,11 +1820,14 @@ def draw_panel(
 ) -> tuple[int, int, int, int]:
     anchor_col = max(1, anchor_col)
     render_width = max(1, width - anchor_col + 1)
+    result_anchor_col = max(1, anchor_col - 1)
+    result_render_width = max(1, width - result_anchor_col + 1)
     muted = style(fg_rgb=DORIC["fg_shadow_subtle"])
     query_lead_cols = 1
     query_width = query_text_render_width(render_width, query_lead_cols)
 
-    lines: list[str] = []
+    query_lines: list[str] = []
+    result_lines: list[str] = []
     cursor_pos = max(0, min(cursor_pos, len(query)))
     query_start, query_view_len, query_rows_used, results_visible = wrapped_query_layout(
         query,
@@ -1865,21 +1869,21 @@ def draw_panel(
                 note_text = debug_note[: max(0, room - 1)]
                 if note_text:
                     query_line += f" {muted}{note_text}{RESET}"
-        lines.append(query_line)
+        query_lines.append(query_line)
 
     effective_total = max(len(results), total_count or 0)
     top_remaining = max(0, effective_total - results_visible)
     use_visible_total_for_more = top_remaining <= 97
-    shared_result_width = max(1, min(render_width, 1 + FIXED_MATCH_TEXT_WIDTH))
+    shared_result_width = max(1, min(result_render_width, RESULT_PREFIX_WIDTH + FIXED_MATCH_TEXT_WIDTH))
     for i in range(results_visible):
         idx = offset + i
         if idx >= len(results):
             if i == 0 and status_message:
-                lines.append(
+                result_lines.append(
                     f"{style(fg_rgb=DORIC['fg_shadow_intense'], bg_rgb=DORIC['bg_neutral'], bold=True)} {status_message} {RESET}"
                 )
             else:
-                lines.append("")
+                result_lines.append("")
             continue
         remaining = max(0, effective_total - (offset + results_visible))
         if use_visible_total_for_more:
@@ -1894,10 +1898,13 @@ def draw_panel(
             unselected_white=True,
             suffix_text="",
         )
-        lines.append(base_line)
+        result_lines.append(base_line)
 
-    for i, line in enumerate(lines[:panel_rows]):
+    for i, line in enumerate(query_lines[:query_rows_used]):
         term_write(move_to(anchor_row + i, anchor_col) + CLEAR_TO_END + line)
+    remaining_rows = max(0, panel_rows - query_rows_used)
+    for i, line in enumerate(result_lines[:remaining_rows]):
+        term_write(move_to(anchor_row + query_rows_used + i, result_anchor_col) + CLEAR_TO_END + line)
 
     # Put cursor on query input field.
     cursor_row_abs, cursor_col = query_cursor_visual_position(query_rows, cursor_pos)
