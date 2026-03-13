@@ -213,6 +213,7 @@ DISABLE_MOUSE = "\x1b[?1000l\x1b[?1002l\x1b[?1006l"
 MAX_RETURNED_RESULTS = 100
 FIXED_MATCH_TEXT_WIDTH = 3000
 RESULT_PREFIX_WIDTH = 2
+SELECTOR_GLYPH = "▶"
 
 TERM_OUT = sys.stdout
 
@@ -1767,15 +1768,15 @@ def render_result_line(
     else:
         normal_style = RESET
     if selected:
-        match_style = RESET + style(fg=1, bold=True)
+        match_style = RESET + style(fg=1, bold=True, underline=True)
     else:
-        match_style = style(fg=1)
+        match_style = style(fg=1, underline=True)
 
     connector_ch = connector[:1] or " "
     connector_style = style(fg=1, bold=True) if connector_active else ""
     connector_part = f"{connector_style}{connector_ch}{RESET}" if connector_style else connector_ch
     if selected:
-        gutter = f"{style(fg=1, bold=True)}▶{RESET}{connector_part}"
+        gutter = f"{style(fg=1, bold=True)}{SELECTOR_GLYPH}{RESET}{connector_part}"
     else:
         gutter = f" {connector_part}"
 
