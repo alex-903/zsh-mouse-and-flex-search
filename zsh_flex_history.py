@@ -1921,7 +1921,7 @@ def draw_panel(
         if selected_visible_index is None or not (connector_start <= selected_visible_index < connector_end):
             return " "
         if connector_count <= 1:
-            return "╴" if row_index == selected_visible_index else " "
+            return " "
         if row_index == selected_visible_index:
             if row_index == connector_start:
                 return "╮"
@@ -1930,9 +1930,9 @@ def draw_panel(
             return "┤"
         if connector_start < selected_visible_index < (connector_end - 1):
             if row_index == connector_start:
-                return "╮"
+                return "╭"
             if row_index == connector_end - 1:
-                return "╯"
+                return "╰"
         return "│"
 
     for i in range(results_visible):
