@@ -211,7 +211,7 @@ SHOW_CURSOR = "\x1b[?25h"
 ENABLE_MOUSE = "\x1b[?1000h\x1b[?1002h\x1b[?1006h"
 DISABLE_MOUSE = "\x1b[?1000l\x1b[?1002l\x1b[?1006l"
 MAX_RETURNED_RESULTS = 100
-FIXED_MATCH_TEXT_WIDTH = 30
+FIXED_MATCH_TEXT_WIDTH = 3000
 RESULT_PREFIX_WIDTH = 2
 
 TERM_OUT = sys.stdout
@@ -1760,21 +1760,17 @@ def render_result_line(
     ordered_positions = ordered_query_word_positions(query, item.text_lower if item.text_lower is not None else item.text.lower())
     pos_set = set(ordered_positions if ordered_positions is not None else item.positions)
 
-    match_fg = DORIC["fg_red"]
-    row_fg = DORIC["fg_main"] if unselected_white else DORIC["fg_neutral"]
-    selected_fg = DORIC["fg_red"]
+    if selected:
+        normal_style = RESET + style(fg=1, bold=True)
+    else:
+        normal_style = RESET
+    if selected:
+        match_style = RESET + style(fg=1, bold=True, underline=True)
+    else:
+        match_style = style(fg=1, underline=True)
 
     if selected:
-        normal_style = RESET + style(fg_rgb=selected_fg, bold=True)
-    else:
-        normal_style = RESET + style(fg_rgb=row_fg)
-    if selected:
-        match_style = RESET + style(fg_rgb=match_fg, bold=True, underline=True)
-    else:
-        match_style = style(fg_rgb=match_fg, underline=True)
-
-    if selected:
-        gutter = f"{style(fg_rgb=selected_fg, bold=True)}▶{RESET} "
+        gutter = f"{style(fg=1, bold=True)}▶{RESET} "
     else:
         gutter = "  "
 
