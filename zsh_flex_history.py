@@ -1767,9 +1767,9 @@ def render_result_line(
     else:
         normal_style = RESET
     if selected:
-        match_style = RESET + style(fg=1, bold=True, underline=True)
+        match_style = RESET + style(fg=1, bold=True)
     else:
-        match_style = style(fg=1, underline=True)
+        match_style = style(fg=1)
 
     connector_ch = connector[:1] or " "
     connector_style = style(fg=1, bold=True) if connector_active else ""
@@ -1917,27 +1917,22 @@ def draw_panel(
     def connector_for_visible_row(row_index: int) -> str:
         if not (connector_start <= row_index < connector_end):
             return " "
-        if connector_count <= 1:
-            return "┼" if selected_visible_index == row_index else "─"
         if selected_visible_index is None or not (connector_start <= selected_visible_index < connector_end):
-            if row_index == connector_start:
-                return "┌"
-            if row_index == connector_end - 1:
-                return "└"
-            return "├"
+            return " "
+        if connector_count <= 1:
+            return "╴" if row_index == selected_visible_index else " "
         if row_index == selected_visible_index:
             if row_index == connector_start:
-                return "┬"
+                return "╮"
             if row_index == connector_end - 1:
-                return "┴"
-            return "┼"
-        if row_index < selected_visible_index:
+                return "╯"
+            return "┤"
+        if connector_start < selected_visible_index < (connector_end - 1):
             if row_index == connector_start:
-                return "┌"
-            return "├"
-        if row_index == connector_end - 1:
-            return "└"
-        return "├"
+                return "╮"
+            if row_index == connector_end - 1:
+                return "╯"
+        return "│"
 
     for i in range(results_visible):
         idx = offset + i
