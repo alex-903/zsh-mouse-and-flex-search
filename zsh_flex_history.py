@@ -1871,6 +1871,20 @@ def draw_panel(
     effective_total = max(len(results), total_count or 0)
     top_remaining = max(0, effective_total - results_visible)
     use_visible_total_for_more = top_remaining <= 97
+    visible_result_items = [
+        results[offset + i]
+        for i in range(results_visible)
+        if (offset + i) < len(results)
+    ]
+    shared_result_width = max(1, render_width)
+    if visible_result_items:
+        max_body_width = max(0, render_width - 1)
+        longest_displayed = 0
+        for item in visible_result_items:
+            display_text = item.text.replace("\r", " ").replace("\n", " ")
+            truncated = truncate_text(display_text, max_body_width)
+            longest_displayed = max(longest_displayed, text_display_width(truncated))
+        shared_result_width = min(render_width, 1 + min(max_body_width, longest_displayed + 1))
     for i in range(results_visible):
         idx = offset + i
         if idx >= len(results):
@@ -1889,7 +1903,7 @@ def draw_panel(
         base_line = render_result_line(
             results[idx],
             idx == selected,
-            render_width,
+            shared_result_width,
             query=query,
             unselected_white=True,
             suffix_text="",
