@@ -605,6 +605,17 @@ def daemon_debug_log(enabled: bool, message: str) -> None:
         print(f"[zsh_flex_history daemon] {message}", file=sys.stderr)
 
 
+def query_equals_candidate(query: str, candidate: str) -> bool:
+    normalized_query = query.strip().lower()
+    return bool(normalized_query) and candidate.strip().lower() == normalized_query
+
+
+def filter_exact_query_match(query: str, results: list[MatchResult]) -> list[MatchResult]:
+    if not query.strip():
+        return results
+    return [item for item in results if not query_equals_candidate(query, item.text)]
+
+
 def flex_match(query: str, candidate: str, *, candidate_lower: Optional[str] = None) -> Optional[MatchResult]:
     if not query:
         return MatchResult(candidate, 0, [], text_lower=candidate_lower or candidate.lower())
@@ -914,6 +925,8 @@ def resolve_runtime_matches(
     for candidate in runtime_candidates:
         if candidate in seen:
             continue
+        if query_equals_candidate(query, candidate):
+            continue
         seen.add(candidate)
         candidate_lower = candidate.lower()
         matched = flex_match(query, candidate, candidate_lower=candidate_lower)
@@ -976,18 +989,18 @@ def search_history_only(
 
     matched_indices: list[int] = []
     history_results: list[MatchResult] = []
-    normalized_query = query.strip().lower()
-
     for idx in candidates:
         entry = history[idx]
         cmd = entry.text
         m = flex_match(query, cmd, candidate_lower=entry.text_lower)
         if m is None:
             continue
+        if query_equals_candidate(query, cmd):
+            continue
 
         matched_indices.append(idx)
 
-        m.exact = bool(normalized_query) and cmd.strip().lower() == normalized_query
+        m.exact = query_equals_candidate(query, cmd)
         m.recency = -idx
         m.cwd = entry.cwd
         m.text_lower = entry.text_lower
@@ -2572,7 +2585,7 @@ def run(
                             history_load_error = True
                         if result_query == query:
                             displayed_matched_indices = result_indices
-                            displayed_results = result_results
+                            displayed_results = filter_exact_query_match(query, result_results)
                             displayed_matched_count = result_count
                             displayed_total_count = result_total
 
@@ -2641,6 +2654,7 @@ def run(
                     cache_key = query
                     if cache_key in match_cache:
                         matched_indices, results, matched_count, total_count = match_cache[cache_key]
+                        results = filter_exact_query_match(query, results)
                         displayed_matched_indices = matched_indices
                         displayed_results = results
                         displayed_matched_count = matched_count
@@ -2650,7 +2664,7 @@ def run(
                             search_requests.put((cache_key, search_candidates_for(cache_key), current_cwd_text))
                             queued_search_key = cache_key
                         matched_indices = displayed_matched_indices
-                        results = displayed_results
+                        results = filter_exact_query_match(query, displayed_results)
                         matched_count = displayed_matched_count
                         total_count = displayed_total_count
                     last_query = query
