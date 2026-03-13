@@ -204,7 +204,6 @@ def style(
 
 RESET = "\x1b[0m"
 QUERY_SELECTION_BG = style(fg_rgb=DORIC["fg_blue"], bg_rgb=DORIC["bg_blue"])
-RESULT_WIDTH_ANIMATION_STEP_SECONDS = 1.0 / 120.0
 CLEAR_LINE = "\x1b[2K"
 CLEAR_TO_END = "\x1b[K"
 HIDE_CURSOR = "\x1b[?25l"
@@ -212,6 +211,7 @@ SHOW_CURSOR = "\x1b[?25h"
 ENABLE_MOUSE = "\x1b[?1000h\x1b[?1002h\x1b[?1006h"
 DISABLE_MOUSE = "\x1b[?1000l\x1b[?1002l\x1b[?1006l"
 MAX_RETURNED_RESULTS = 100
+FIXED_MATCH_TEXT_WIDTH = 30
 
 TERM_OUT = sys.stdout
 
@@ -1739,29 +1739,6 @@ def selection_bounds(sel_anchor: Optional[int], sel_end: Optional[int]) -> Optio
     return (min(sel_anchor, sel_end), max(sel_anchor, sel_end))
 
 
-def shared_result_line_width(
-    results: list[MatchResult],
-    offset: int,
-    results_visible: int,
-    render_width: int,
-) -> int:
-    shared_result_width = max(1, render_width)
-    visible_result_items = [
-        results[offset + i]
-        for i in range(results_visible)
-        if (offset + i) < len(results)
-    ]
-    if visible_result_items:
-        max_body_width = max(0, render_width - 1)
-        longest_displayed = 0
-        for item in visible_result_items:
-            display_text = item.text.replace("\r", " ").replace("\n", " ")
-            truncated = truncate_text(display_text, max_body_width)
-            longest_displayed = max(longest_displayed, text_display_width(truncated))
-        shared_result_width = min(render_width, 1 + min(max_body_width, longest_displayed + 1))
-    return shared_result_width
-
-
 def render_result_line(
     item: MatchResult,
     selected: bool,
@@ -1784,23 +1761,21 @@ def render_result_line(
 
     match_fg = DORIC["fg_red"]
     row_fg = DORIC["fg_main"] if unselected_white else DORIC["fg_neutral"]
-    row_bg = DORIC["bg_shadow_subtle"]
     selected_fg = DORIC["fg_red"]
-    selected_bg = DORIC["bg_red"]
 
     if selected:
-        normal_style = RESET + style(fg_rgb=selected_fg, bg_rgb=selected_bg, bold=True)
+        normal_style = RESET + style(fg_rgb=selected_fg, bold=True)
     else:
-        normal_style = RESET + style(fg_rgb=row_fg, bg_rgb=row_bg)
+        normal_style = RESET + style(fg_rgb=row_fg)
     if selected:
-        match_style = RESET + style(fg_rgb=match_fg, bg_rgb=selected_bg, bold=True, underline=True)
+        match_style = RESET + style(fg_rgb=match_fg, bold=True, underline=True)
     else:
-        match_style = style(fg_rgb=match_fg, bg_rgb=row_bg, underline=True)
+        match_style = style(fg_rgb=match_fg, underline=True)
 
     if selected:
-        gutter = f"{style(bg_rgb=DORIC['bg_red'])} {RESET}"
+        gutter = f"{style(fg_rgb=selected_fg, bold=True)}▶{RESET}"
     else:
-        gutter = f"{style(bg_rgb=row_bg)} {RESET}"
+        gutter = " "
 
     out: list[str] = []
     active_style = ""
@@ -1820,8 +1795,8 @@ def render_result_line(
         if normal_style != active_style:
             out.append(normal_style)
         out.append(" ")
-        out.append(f"{style(fg_rgb=DORIC['fg_shadow_subtle'], bg_rgb=selected_bg if selected else row_bg)}[{suffix_text}]{RESET}")
-        out.append(f"{style(bg_rgb=selected_bg if selected else row_bg)} {RESET}")
+        out.append(f"{style(fg_rgb=DORIC['fg_shadow_subtle'])}[{suffix_text}]{RESET}")
+        out.append(" ")
     out.append(RESET)
     return gutter + "".join(out)
 
@@ -1841,7 +1816,6 @@ def draw_panel(
     status_message: str = "",
     debug_note: str = "",
     total_count: Optional[int] = None,
-    result_width_override: Optional[int] = None,
 ) -> tuple[int, int, int, int]:
     anchor_col = max(1, anchor_col)
     render_width = max(1, width - anchor_col + 1)
@@ -1896,11 +1870,7 @@ def draw_panel(
     effective_total = max(len(results), total_count or 0)
     top_remaining = max(0, effective_total - results_visible)
     use_visible_total_for_more = top_remaining <= 97
-    shared_result_width = (
-        max(1, min(render_width, result_width_override))
-        if result_width_override is not None
-        else shared_result_line_width(results, offset, results_visible, render_width)
-    )
+    shared_result_width = max(1, min(render_width, 1 + FIXED_MATCH_TEXT_WIDTH))
     for i in range(results_visible):
         idx = offset + i
         if idx >= len(results):
@@ -2351,9 +2321,6 @@ def run(
             displayed_matched_indices = initial_matched_indices
             displayed_matched_count = initial_matched_count
             displayed_total_count = initial_total_count
-            animated_result_width: Optional[int] = None
-            target_result_width: Optional[int] = None
-            next_result_width_tick: Optional[float] = None
             mouse_selecting = False
             mouse_enabled = False
             last_left_click_time = 0.0
@@ -2686,31 +2653,6 @@ def run(
                         results = filter_exact_query_match(query, displayed_results)
                         matched_count = displayed_matched_count
                         total_count = displayed_total_count
-                    target_result_width = shared_result_line_width(results, offset, visible, render_width)
-                    now = time.monotonic()
-                    if animated_result_width is None:
-                        animated_result_width = target_result_width
-                        next_result_width_tick = None
-                    elif target_result_width != animated_result_width and next_result_width_tick is None:
-                        next_result_width_tick = now + RESULT_WIDTH_ANIMATION_STEP_SECONDS
-                    while (
-                        animated_result_width is not None
-                        and target_result_width is not None
-                        and animated_result_width != target_result_width
-                        and next_result_width_tick is not None
-                        and now >= next_result_width_tick
-                    ):
-                        if animated_result_width < target_result_width:
-                            animated_result_width += 1
-                        else:
-                            animated_result_width -= 1
-                        next_result_width_tick += RESULT_WIDTH_ANIMATION_STEP_SECONDS
-                    if (
-                        animated_result_width is not None
-                        and target_result_width is not None
-                        and animated_result_width == target_result_width
-                    ):
-                        next_result_width_tick = None
                     last_query = query
                     last_matched_indices = matched_indices
                     status_message = ""
@@ -2748,21 +2690,12 @@ def run(
                         status_message=status_message,
                         debug_note=debug_note,
                         total_count=total_count,
-                        result_width_override=animated_result_width,
                     )
                     last_drawn_panel_rows = panel_rows
 
                     input_timeout: Optional[float] = 0.03
                     if not history_loading and queued_search_key is None:
                         input_timeout = None
-                    if (
-                        next_result_width_tick is not None
-                        and animated_result_width is not None
-                        and target_result_width is not None
-                        and animated_result_width != target_result_width
-                    ):
-                        frame_timeout = max(0.0, next_result_width_tick - time.monotonic())
-                        input_timeout = frame_timeout if input_timeout is None else min(input_timeout, frame_timeout)
                     ev, payload = read_key(fd, timeout=input_timeout)
                     if ev == "timeout":
                         continue
