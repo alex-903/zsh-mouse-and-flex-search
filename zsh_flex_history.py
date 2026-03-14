@@ -173,6 +173,10 @@ def hex_to_rgb(value: str) -> tuple[int, int, int]:
     return int(value[0:2], 16), int(value[2:4], 16), int(value[4:6], 16)
 
 
+def rgb_to_hex(r: int, g: int, b: int) -> str:
+    return f"#{max(0, min(r, 255)):02x}{max(0, min(g, 255)):02x}{max(0, min(b, 255)):02x}"
+
+
 def style(
     *,
     fg: Optional[int] = None,
@@ -342,6 +346,58 @@ def query_cursor_position(fd: int) -> Optional[tuple[int, int]]:
             # waiting out the full timeout on every startup.
             break
     return last_match
+
+
+def _scale_hex_component(component: str) -> int:
+    if not component:
+        raise ValueError("empty color component")
+    value = int(component, 16)
+    max_value = (16 ** len(component)) - 1
+    if max_value <= 0:
+        return 0
+    return round((value / max_value) * 255)
+
+
+def query_cursor_color(fd: int) -> Optional[str]:
+    # Ask the terminal for its cursor color using OSC 12. Many terminals do
+    # not support this, so callers must treat the result as best-effort only.
+    while True:
+        ready, _, _ = select.select([fd], [], [], 0)
+        if not ready:
+            break
+        try:
+            os.read(fd, 4096)
+        except OSError:
+            break
+
+    term_write("\x1b]12;?\x07")
+    term_flush()
+    buf = bytearray()
+    deadline = time.monotonic() + 0.15
+    while time.monotonic() < deadline:
+        ready, _, _ = select.select([fd], [], [], 0.02)
+        if not ready:
+            continue
+        try:
+            chunk = os.read(fd, 128)
+        except OSError:
+            return None
+        if not chunk:
+            continue
+        buf.extend(chunk)
+        if b"\x07" in buf or b"\x1b\\" in buf:
+            break
+
+    match = re.search(rb"\x1b\]12;rgb:([0-9a-fA-F]+)/([0-9a-fA-F]+)/([0-9a-fA-F]+)(?:\x07|\x1b\\)", bytes(buf))
+    if match is None:
+        return None
+    try:
+        r = _scale_hex_component(match.group(1).decode("ascii"))
+        g = _scale_hex_component(match.group(2).decode("ascii"))
+        b = _scale_hex_component(match.group(3).decode("ascii"))
+    except (UnicodeDecodeError, ValueError):
+        return None
+    return rgb_to_hex(r, g, b)
 
 
 def normalize_cwd_value(cwd: str) -> str:
@@ -1823,6 +1879,7 @@ def draw_panel(
     status_message: str = "",
     debug_note: str = "",
     total_count: Optional[int] = None,
+    cursor_bg_rgb: Optional[str] = None,
 ) -> tuple[int, int, int, int]:
     anchor_col = max(1, anchor_col)
     render_width = max(1, width - anchor_col + 1)
@@ -1835,7 +1892,7 @@ def draw_panel(
         return result_anchor_col
 
     muted = style(fg_rgb=DORIC["fg_shadow_subtle"])
-    visual_cursor_style = style(bg=7, bold=True)
+    visual_cursor_style = style(bg_rgb=cursor_bg_rgb, bold=True) if cursor_bg_rgb else style(bg=7, bold=True)
     query_lead_cols = 1
     query_width = query_text_render_width(render_width, query_lead_cols)
 
@@ -2287,6 +2344,7 @@ def run(
 
     try:
         with RawTerminal(fd) as rt:
+            cursor_bg_rgb = query_cursor_color(fd)
             term_size = tty_terminal_size(fd)
             term_lines = term_size.lines
             pos = query_cursor_position(fd)
@@ -2765,6 +2823,7 @@ def run(
                         status_message=status_message,
                         debug_note=debug_note,
                         total_count=total_count,
+                        cursor_bg_rgb=cursor_bg_rgb,
                     )
                     last_drawn_panel_rows = panel_rows
 
