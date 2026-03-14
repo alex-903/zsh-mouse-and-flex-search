@@ -283,6 +283,10 @@ def normalize_shell_command(text: str) -> str:
     return cleaned.strip("\n")
 
 
+def is_editor_escape_command(text: str) -> bool:
+    return text.strip() == "${VISUAL:-${EDITOR:-nano}} ."
+
+
 class RawTerminal:
     def __init__(self, fd: int) -> None:
         self.fd = fd
@@ -2139,7 +2143,7 @@ def read_key(fd: int, timeout: Optional[float] = 0.1) -> tuple[str, object]:
 
         ch = data[0]
         if ch == 3:
-            return "quit", None
+            return "interrupt", None
         if ch == 1:
             return "home", None
         if ch == 5:
@@ -2165,7 +2169,7 @@ def read_key(fd: int, timeout: Optional[float] = 0.1) -> tuple[str, object]:
             seq = read_escape_tail()
             full = b"\x1b" + seq
             if full == b"\x1b":
-                return "quit", None
+                return "escape", None
             if full in (b"\x1b[A",):
                 return "up", None
             if full in (b"\x1b[B",):
@@ -2771,8 +2775,13 @@ def run(
                     if ev == "timeout":
                         continue
     
-                    if ev == "quit":
+                    if ev == "interrupt":
                         clear_panel_and_restore_cursor()
+                        return None
+                    if ev == "escape":
+                        clear_panel_and_restore_cursor()
+                        if inline_with_prompt:
+                            return '${VISUAL:-${EDITOR:-nano}} .'
                         return None
                     if ev == "enter":
                         if not query and 0 <= selected < len(results):
@@ -3161,7 +3170,7 @@ def main() -> int:
         selected = selected.replace("\r\n", "\n").replace("\r", "\n").replace("\x00", "")
         if not selected.strip():
             return 1
-        if args.use_custom_history:
+        if args.use_custom_history and not is_editor_escape_command(selected):
             append_custom_history_entry(
                 history_path,
                 selected,
