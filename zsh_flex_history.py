@@ -210,7 +210,6 @@ RESET = "\x1b[0m"
 QUERY_SELECTION_BG = style(fg_rgb=DORIC["fg_blue"], bg_rgb=DORIC["bg_blue"])
 CLEAR_LINE = "\x1b[2K"
 CLEAR_TO_END = "\x1b[K"
-HIDE_CURSOR = "\x1b[?25l"
 SHOW_CURSOR = "\x1b[?25h"
 ENABLE_MOUSE = "\x1b[?1000h\x1b[?1002h\x1b[?1006h"
 DISABLE_MOUSE = "\x1b[?1000l\x1b[?1002l\x1b[?1006l"
@@ -306,8 +305,7 @@ class RawTerminal:
         # Start with mouse reporting disabled; it will be enabled lazily
         # once the user types the first character in the query.
         term_write(DISABLE_MOUSE)
-        # Keep the terminal cursor hidden while we paint a cosmetic cursor.
-        term_write(HIDE_CURSOR)
+        term_write(SHOW_CURSOR)
         term_flush()
         return self
 
@@ -1879,7 +1877,6 @@ def draw_panel(
     status_message: str = "",
     debug_note: str = "",
     total_count: Optional[int] = None,
-    cursor_bg_rgb: Optional[str] = None,
 ) -> tuple[int, int, int, int]:
     anchor_col = max(1, anchor_col)
     render_width = max(1, width - anchor_col + 1)
@@ -1892,7 +1889,6 @@ def draw_panel(
         return result_anchor_col
 
     muted = style(fg_rgb=DORIC["fg_shadow_subtle"])
-    visual_cursor_style = style(bg_rgb=cursor_bg_rgb, bold=True) if cursor_bg_rgb else style(bg=7, bold=True)
     query_lead_cols = 1
     query_width = query_text_render_width(render_width, query_lead_cols)
 
@@ -1921,28 +1917,14 @@ def draw_panel(
             qidx = vrow.start + i
             token = syntax_tokens[qidx] if qidx < len(syntax_tokens) else "default"
             token_style = ansi_for_token(token)
-            is_cursor_char = row_cursor_index == i
             if sel and sel[0] <= qidx < sel[1]:
                 if active_query_style:
                     query_parts.append(RESET)
                     active_query_style = ""
-                if is_cursor_char and token_style:
-                    query_parts.append(f"{QUERY_SELECTION_BG}{visual_cursor_style}{token_style}{ch}{RESET}")
-                elif is_cursor_char:
-                    query_parts.append(f"{QUERY_SELECTION_BG}{visual_cursor_style}{ch}{RESET}")
-                elif token_style:
+                if token_style:
                     query_parts.append(f"{QUERY_SELECTION_BG}{token_style}{ch}{RESET}")
                 else:
                     query_parts.append(f"{QUERY_SELECTION_BG}{ch}{RESET}")
-                continue
-            if is_cursor_char:
-                if active_query_style:
-                    query_parts.append(RESET)
-                    active_query_style = ""
-                if token_style:
-                    query_parts.append(f"{visual_cursor_style}{token_style}{ch}{RESET}")
-                else:
-                    query_parts.append(f"{visual_cursor_style}{ch}{RESET}")
                 continue
             if token_style != active_query_style:
                 query_parts.append(token_style if token_style else RESET)
@@ -1950,8 +1932,6 @@ def draw_panel(
             query_parts.append(ch)
         if active_query_style:
             query_parts.append(RESET)
-        if row_cursor_index == len(vrow.text):
-            query_parts.append(f"{visual_cursor_style} {RESET}")
         query_line = " " + "".join(query_parts)
         if row == 0 and debug_note:
             room = max(0, render_width - (seg_len + query_lead_cols))
@@ -2344,7 +2324,6 @@ def run(
 
     try:
         with RawTerminal(fd) as rt:
-            cursor_bg_rgb = query_cursor_color(fd)
             term_size = tty_terminal_size(fd)
             term_lines = term_size.lines
             pos = query_cursor_position(fd)
@@ -2823,7 +2802,6 @@ def run(
                         status_message=status_message,
                         debug_note=debug_note,
                         total_count=total_count,
-                        cursor_bg_rgb=cursor_bg_rgb,
                     )
                     last_drawn_panel_rows = panel_rows
 
