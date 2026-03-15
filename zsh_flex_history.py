@@ -1999,7 +1999,7 @@ def draw_panel(
     cursor_row_abs, cursor_col = query_cursor_visual_position(query_rows, cursor_pos)
     cursor_row = min(query_rows_used - 1, max(0, cursor_row_abs - query_start))
     cursor_col = max(0, min(cursor_col + query_lead_cols, render_width - 1))
-    term_write(move_to(anchor_row + cursor_row, anchor_col + cursor_col))
+    term_write(move_to(anchor_row + cursor_row, draw_col_for_row(cursor_row) + cursor_col))
     term_flush()
     return query_start, query_view_len, query_rows_used, results_visible
 
@@ -3044,7 +3044,8 @@ def run(
                         # Query line interactions (including wrapped rows).
                         if anchor_row <= my < (anchor_row + query_rows_used):
                             click_row = my - anchor_row
-                            click_col = max(0, mx - anchor_col - 1)
+                            click_anchor_col = anchor_col if click_row == 0 else max(1, anchor_col - 1)
+                            click_col = max(0, mx - click_anchor_col - 1)
                             click_pos = query_pos_from_visual(
                                 query,
                                 query_width,
