@@ -22,7 +22,7 @@ import tty
 from datetime import datetime, timezone
 import unicodedata
 from argparse import SUPPRESS, ArgumentParser
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, List, Optional
 
@@ -85,6 +85,7 @@ class MatchResult:
     recency: int = 0
     cwd: Optional[str] = None
     text_lower: Optional[str] = None
+    runtime_completion: bool = False
 
 
 @dataclass
@@ -284,10 +285,6 @@ def normalize_shell_command(text: str) -> str:
     cleaned = text.replace("\r\n", "\n").replace("\r", "\n").replace("\x00", "")
     cleaned = cleaned.replace("\\\n", "")
     return cleaned.strip("\n")
-
-
-def is_editor_escape_command(text: str) -> bool:
-    return text.strip() == "${VISUAL:-${EDITOR:-nano}} ."
 
 
 class RawTerminal:
@@ -815,17 +812,67 @@ def shell_escape_fragment(text: str) -> str:
     return "".join(escaped)
 
 
-def command_token_for_query(query: str) -> Optional[str]:
-    stripped = query.strip()
+def replace_query_token(query: str, cursor_pos: int, replacement: str) -> str:
+    start, end = token_bounds(query, cursor_pos)
+    return query[:start] + replacement + query[end:]
+
+
+def startup_runtime_completion(
+    query: str,
+    cursor_pos: int,
+    startup_entries: tuple[DirectoryListingEntry, ...],
+) -> Optional[MatchResult]:
+    if not query.strip():
+        return None
+
+    start, end = token_bounds(query, cursor_pos)
+    raw_token = query[start:end]
+    stripped = strip_enclosing_quotes(raw_token)
     if not stripped:
         return None
-    try:
-        tokens = shlex.split(stripped)
-    except ValueError:
-        tokens = stripped.split()
-    if not tokens:
+
+    token_prefix = shell_unescape_fragment(stripped)
+    if len(token_prefix) <= 2 or "/" in token_prefix:
         return None
-    return tokens[0]
+    token_prefix_lower = token_prefix.lower()
+
+    matches: list[DirectoryListingEntry] = []
+    for entry in startup_entries:
+        if entry.name.startswith(".") and not token_prefix.startswith("."):
+            continue
+        if entry.name.lower().startswith(token_prefix_lower):
+            matches.append(entry)
+
+    if not matches:
+        return None
+
+    matches.sort(key=lambda entry: (entry.name.lower(), entry.name))
+    chosen = matches[0]
+    completed_token = shell_escape_fragment(chosen.name + ("/" if chosen.is_dir else ""))
+    completed_query = replace_query_token(query, cursor_pos, completed_token)
+    if completed_query == query:
+        return None
+
+    return MatchResult(
+        text=completed_query,
+        score=10**9,
+        positions=[],
+        text_lower=completed_query.lower(),
+        runtime_completion=True,
+    )
+
+
+def insert_runtime_completion(results: list[MatchResult], runtime_completion: Optional[MatchResult]) -> list[MatchResult]:
+    if runtime_completion is None:
+        return results
+    merged = list(results)
+    for index in range(min(2, len(merged))):
+        if merged[index].text == runtime_completion.text:
+            merged[index] = replace(merged[index], runtime_completion=True)
+            return merged
+    insertion_index = min(2, len(merged))
+    merged.insert(insertion_index, runtime_completion)
+    return merged
 
 
 def shell_words_for_matching(text: str) -> list[str]:
@@ -837,166 +884,6 @@ def shell_words_for_matching(text: str) -> list[str]:
     except ValueError:
         tokens = stripped.split()
     return [token for token in tokens if token]
-
-
-def path_completion_replacements(
-    query: str,
-    cursor_pos: int,
-    *,
-    cwd: Optional[Path] = None,
-    dirs_only: bool = False,
-    limit: int = 64,
-) -> list[str]:
-    start, end = token_bounds(query, cursor_pos)
-    raw_token = query[start:end]
-    stripped = strip_enclosing_quotes(raw_token)
-    if not stripped:
-        return []
-
-    unescaped = shell_unescape_fragment(stripped)
-    working_dir = cwd or Path.cwd()
-
-    if unescaped.endswith("/"):
-        parent_part = unescaped[:-1]
-        name_prefix = ""
-    else:
-        parent_part, sep, name_prefix = unescaped.rpartition("/")
-        if not sep:
-            parent_part = ""
-
-    if unescaped.startswith("/"):
-        base_dir = Path(parent_part) if parent_part else Path("/")
-        display_prefix = parent_part if parent_part else "/"
-    elif unescaped.startswith("~"):
-        full = Path(unescaped).expanduser()
-        if unescaped.endswith("/"):
-            base_dir = full
-            name_prefix = ""
-        else:
-            base_dir = full.parent
-            name_prefix = full.name
-        display_prefix = str(Path(unescaped).parent)
-        if display_prefix == ".":
-            display_prefix = "~"
-    else:
-        rel_parent = Path(parent_part) if parent_part else Path(".")
-        base_dir = (working_dir / rel_parent).resolve()
-        display_prefix = parent_part
-
-    cached_entries = cached_directory_listing(base_dir)
-    if cached_entries is None:
-        return []
-
-    replacements: list[str] = []
-    quote, has_closing_quote = enclosing_quote(raw_token)
-    direct_matches: list[tuple[str, Path, bool]] = []
-
-    def format_token(token: str) -> str:
-        if quote is not None:
-            inner = token.replace("\\", "\\\\")
-            if quote == '"':
-                inner = inner.replace('"', '\\"')
-            else:
-                inner = inner.replace("'", "\\'")
-            return quote + inner + (quote if has_closing_quote else "")
-        return shell_escape_fragment(token)
-
-    def push_replacement(token: str) -> None:
-        replacement = query[:start] + format_token(token) + query[end:]
-        replacements.append(replacement)
-
-    for entry in cached_entries:
-        if entry.name.startswith(".") and not name_prefix.startswith("."):
-            continue
-        if not entry.name.startswith(name_prefix):
-            continue
-        if dirs_only and not entry.is_dir:
-            continue
-        suggested_piece = entry.name
-        if entry.is_dir:
-            suggested_piece += "/"
-        if display_prefix == "":
-            completed_token = suggested_piece
-        elif display_prefix == ".":
-            completed_token = "./" + suggested_piece
-        elif display_prefix == "/":
-            completed_token = "/" + suggested_piece
-        else:
-            completed_token = display_prefix.rstrip("/") + "/" + suggested_piece
-        direct_matches.append((completed_token, entry.path, entry.is_dir))
-
-    direct_matches.sort(key=lambda item: item[0])
-    for completed_token, _, _ in direct_matches:
-        push_replacement(completed_token)
-        if len(replacements) >= limit:
-            return replacements
-
-    dir_matches = [item for item in direct_matches if item[2]]
-    if len(dir_matches) == 1:
-        matched_token, matched_path, _ = dir_matches[0]
-        child_entries = cached_directory_listing(matched_path)
-        if child_entries is not None:
-            child_dirs = sorted(child.name for child in child_entries if child.is_dir)
-            for child_name in child_dirs:
-                descendant_token = matched_token.rstrip("/") + "/" + child_name + "/"
-                push_replacement(descendant_token)
-                if len(replacements) >= limit:
-                    break
-
-    return replacements
-
-def cursor_in_first_token(query: str, cursor_pos: int) -> bool:
-    stripped = query.lstrip()
-    if not stripped:
-        return False
-    leading_ws = len(query) - len(stripped)
-    first_end = leading_ws
-    while first_end < len(query) and not query[first_end].isspace():
-        first_end += 1
-    return leading_ws <= cursor_pos <= first_end
-
-
-def resolve_runtime_matches(
-    query: str,
-    cursor_pos: int,
-    *,
-    cwd: Optional[Path] = None,
-    limit: int = 64,
-) -> list[MatchResult]:
-    if not query.strip():
-        return []
-    if not cursor_in_first_token(query, cursor_pos):
-        return []
-
-    command = command_token_for_query(query) or ""
-    dirs_only = command == "cd"
-    runtime_candidates: list[str] = []
-    runtime_candidates.extend(
-        path_completion_replacements(
-            query,
-            cursor_pos,
-            cwd=cwd,
-            dirs_only=dirs_only,
-            limit=limit,
-        )
-    )
-
-    seen: set[str] = set()
-    resolved: list[MatchResult] = []
-    for candidate in runtime_candidates:
-        if candidate in seen:
-            continue
-        if query_equals_candidate(query, candidate):
-            continue
-        seen.add(candidate)
-        candidate_lower = candidate.lower()
-        matched = flex_match(query, candidate, candidate_lower=candidate_lower)
-        positions = matched.positions if matched is not None else []
-        score = matched.score if matched is not None else -10_000
-        resolved.append(MatchResult(candidate, score, positions, text_lower=candidate_lower))
-        if len(resolved) >= limit:
-            break
-    return resolved
 
 
 def dedupe_match_results_preserving_order(results: list[MatchResult]) -> list[MatchResult]:
@@ -1177,26 +1064,6 @@ def apply_prefix_priority(
     if result_limit is not None:
         return ordered_results[:result_limit]
     return ordered_results
-
-
-def merge_runtime_and_rank(
-    query: str,
-    cursor_pos: int,
-    history_results: list[MatchResult],
-    *,
-    limit: Optional[int] = None,
-    cwd: Optional[Path] = None,
-) -> list[MatchResult]:
-    regular_results = list(history_results)
-    current_cwd = normalize_cwd_value(str(cwd)) if cwd is not None else ""
-
-    seen = {item.text for item in regular_results}
-    for runtime_match in resolve_runtime_matches(query, cursor_pos, cwd=cwd):
-        if runtime_match.text in seen:
-            continue
-        regular_results.append(runtime_match)
-
-    return apply_prefix_priority(query, regular_results, limit=limit, current_cwd=current_cwd or None)
 
 
 def search(
@@ -1821,20 +1688,29 @@ def render_result_line(
     ordered_positions = ordered_query_word_positions(query, item.text_lower if item.text_lower is not None else item.text.lower())
     pos_set = set(ordered_positions if ordered_positions is not None else item.positions)
 
-    if selected:
-        normal_style = RESET + style(fg=1, bold=True)
+    if item.runtime_completion:
+        if selected:
+            normal_style = RESET + style(fg_rgb=DORIC["fg_green"], bold=True)
+            match_style = RESET + style(fg_rgb=DORIC["fg_green"], bold=True, underline=True)
+        else:
+            normal_style = RESET + style(fg_rgb=DORIC["fg_green"])
+            match_style = style(fg_rgb=DORIC["fg_green"], underline=True)
     else:
-        normal_style = RESET
-    if selected:
-        match_style = RESET + style(fg=1, bold=True, underline=True)
-    else:
-        match_style = style(fg=1, underline=True)
+        if selected:
+            normal_style = RESET + style(fg=1, bold=True)
+        else:
+            normal_style = RESET
+        if selected:
+            match_style = RESET + style(fg=1, bold=True, underline=True)
+        else:
+            match_style = style(fg=1, underline=True)
 
+    selector_style = style(fg_rgb=DORIC["fg_green"], bold=True) if item.runtime_completion else style(fg=1, bold=True)
     connector_ch = connector[:1] or " "
-    connector_style = style(fg=1, bold=True) if connector_active else ""
+    connector_style = selector_style if connector_active else ""
     connector_part = f"{connector_style}{connector_ch}{RESET}" if connector_style else connector_ch
     if selected:
-        gutter = f"{style(fg=1, bold=True)}{SELECTOR_GLYPH}{RESET}{connector_part}"
+        gutter = f"{selector_style}{SELECTOR_GLYPH}{RESET}{connector_part}"
     else:
         gutter = f" {connector_part}"
 
@@ -2288,6 +2164,7 @@ def run(
     tty_out_file = None
     current_cwd_text = normalize_cwd_value(os.getcwd())
     current_cwd_path = Path(current_cwd_text)
+    startup_entries = cached_directory_listing(current_cwd_path) or ()
     fd: Optional[int] = None
     for tty_path in ("/dev/tty", os.ctermid()):
         try:
@@ -2765,6 +2642,8 @@ def run(
                         results = filter_exact_query_match(query, displayed_results)
                         matched_count = displayed_matched_count
                         total_count = displayed_total_count
+                    runtime_completion = startup_runtime_completion(query, cursor_pos, startup_entries)
+                    results = insert_runtime_completion(results, runtime_completion)
                     last_query = query
                     last_matched_indices = matched_indices
                     status_message = ""
@@ -2786,7 +2665,7 @@ def run(
                         offset = selected
                     if selected >= offset + visible:
                         offset = selected - visible + 1
-    
+
                     query_start, _query_view_len, query_rows_used, results_visible = draw_panel(
                         anchor_row,
                         anchor_col,
@@ -2817,8 +2696,6 @@ def run(
                         return None
                     if ev == "escape":
                         clear_panel_and_restore_cursor()
-                        if inline_with_prompt:
-                            return '${VISUAL:-${EDITOR:-nano}} .'
                         return None
                     if ev == "enter":
                         if not query and 0 <= selected < len(results):
@@ -3207,7 +3084,7 @@ def main() -> int:
         selected = selected.replace("\r\n", "\n").replace("\r", "\n").replace("\x00", "")
         if not selected.strip():
             return 1
-        if args.use_custom_history and not is_editor_escape_command(selected):
+        if args.use_custom_history:
             append_custom_history_entry(
                 history_path,
                 selected,
