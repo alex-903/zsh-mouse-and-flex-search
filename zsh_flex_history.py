@@ -817,10 +817,12 @@ def replace_query_token(query: str, cursor_pos: int, replacement: str) -> str:
     return query[:start] + replacement + query[end:]
 
 
-def startup_runtime_completion(
+def runtime_completion_match(
     query: str,
     cursor_pos: int,
     startup_entries: tuple[DirectoryListingEntry, ...],
+    *,
+    cwd: Path,
 ) -> Optional[MatchResult]:
     if not query.strip():
         return None
@@ -832,23 +834,69 @@ def startup_runtime_completion(
         return None
 
     token_prefix = shell_unescape_fragment(stripped)
-    if len(token_prefix) <= 2 or "/" in token_prefix:
-        return None
     token_prefix_lower = token_prefix.lower()
-
     matches: list[DirectoryListingEntry] = []
-    for entry in startup_entries:
-        if entry.name.startswith(".") and not token_prefix.startswith("."):
-            continue
-        if entry.name.lower().startswith(token_prefix_lower):
-            matches.append(entry)
+    completed_prefix = ""
+
+    if "/" in token_prefix:
+        if token_prefix.endswith("/"):
+            parent_part = token_prefix[:-1]
+            name_prefix = ""
+        else:
+            parent_part, sep, name_prefix = token_prefix.rpartition("/")
+            if not sep:
+                parent_part = ""
+
+        base_dir: Optional[Path] = None
+        display_prefix = parent_part
+        if token_prefix.startswith("/"):
+            base_dir = Path(parent_part) if parent_part else Path("/")
+            display_prefix = parent_part if parent_part else "/"
+        elif token_prefix.startswith("~"):
+            expanded = Path(parent_part if parent_part else "~").expanduser()
+            base_dir = expanded
+            display_prefix = parent_part if parent_part else "~"
+        else:
+            rel_parent = Path(parent_part) if parent_part else Path(".")
+            base_dir = (cwd / rel_parent).resolve()
+            display_prefix = parent_part
+
+        cached_entries = cached_directory_listing(base_dir) if base_dir is not None else None
+        if cached_entries is None:
+            return None
+
+        name_prefix_lower = name_prefix.lower()
+        for entry in cached_entries:
+            if entry.name.startswith(".") and not name_prefix.startswith("."):
+                continue
+            if entry.name.lower().startswith(name_prefix_lower):
+                matches.append(entry)
+
+        if display_prefix == "":
+            completed_prefix = ""
+        elif display_prefix == ".":
+            completed_prefix = "./"
+        elif display_prefix == "/":
+            completed_prefix = "/"
+        elif display_prefix == "~":
+            completed_prefix = "~/"
+        else:
+            completed_prefix = display_prefix.rstrip("/") + "/"
+    else:
+        if len(token_prefix) <= 2:
+            return None
+        for entry in startup_entries:
+            if entry.name.startswith(".") and not token_prefix.startswith("."):
+                continue
+            if entry.name.lower().startswith(token_prefix_lower):
+                matches.append(entry)
 
     if not matches:
         return None
 
     matches.sort(key=lambda entry: (entry.name.lower(), entry.name))
     chosen = matches[0]
-    completed_token = shell_escape_fragment(chosen.name + ("/" if chosen.is_dir else ""))
+    completed_token = shell_escape_fragment(completed_prefix + chosen.name + ("/" if chosen.is_dir else ""))
     completed_query = replace_query_token(query, cursor_pos, completed_token)
     if completed_query == query:
         return None
@@ -2324,6 +2372,7 @@ def run(
             ] = queue.Queue()
             search_stop = threading.Event()
             queued_search_key: Optional[str] = None
+            preferred_runtime_row: Optional[int] = None
 
             def search_candidates_for(query_text: str) -> Optional[list[int]]:
                 if history_client is not None:
@@ -2642,8 +2691,18 @@ def run(
                         results = filter_exact_query_match(query, displayed_results)
                         matched_count = displayed_matched_count
                         total_count = displayed_total_count
-                    runtime_completion = startup_runtime_completion(query, cursor_pos, startup_entries)
+                    runtime_completion = runtime_completion_match(
+                        query,
+                        cursor_pos,
+                        startup_entries,
+                        cwd=current_cwd_path,
+                    )
                     results = insert_runtime_completion(results, runtime_completion)
+                    if preferred_runtime_row is not None:
+                        runtime_row = min(preferred_runtime_row, 2)
+                        if 0 <= runtime_row < len(results) and results[runtime_row].runtime_completion:
+                            selected = runtime_row
+                        preferred_runtime_row = None
                     last_query = query
                     last_matched_indices = matched_indices
                     status_message = ""
@@ -2707,11 +2766,13 @@ def run(
                         if not query:
                             refresh_anchor_from_cursor()
                         if 0 <= selected < len(results):
+                            preferred_runtime_row = min(selected, 2) if results[selected].runtime_completion else None
                             query = results[selected].text
                             cursor_pos = len(query)
                             clear_selection()
                             sync_mouse_mode()
-                            selected = 0
+                            if preferred_runtime_row is None:
+                                selected = 0
                             offset = 0
                         continue
                     if ev == "left":
