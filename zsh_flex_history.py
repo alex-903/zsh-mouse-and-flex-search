@@ -817,25 +817,49 @@ def replace_query_token(query: str, cursor_pos: int, replacement: str) -> str:
     return query[:start] + replacement + query[end:]
 
 
-def runtime_completion_match(
+def top_ranked_directory_entries(
+    query: str,
+    entries: tuple[DirectoryListingEntry, ...],
+) -> list[DirectoryListingEntry]:
+    entry_by_name: dict[str, DirectoryListingEntry] = {}
+    ranked_candidates: list[MatchResult] = []
+    for entry in entries:
+        matched = flex_match(query, entry.name)
+        if matched is None:
+            continue
+        entry_by_name[entry.name] = entry
+        ranked_candidates.append(matched)
+
+    ranked_results = apply_prefix_priority(query, ranked_candidates)
+    ordered_entries: list[DirectoryListingEntry] = []
+    for item in ranked_results:
+        entry = entry_by_name.get(item.text)
+        if entry is not None:
+            ordered_entries.append(entry)
+    return ordered_entries
+
+
+def runtime_completion_matches(
     query: str,
     cursor_pos: int,
     startup_entries: tuple[DirectoryListingEntry, ...],
     *,
     cwd: Path,
-) -> Optional[MatchResult]:
+    limit: int,
+) -> list[MatchResult]:
+    if limit <= 0:
+        return []
     if not query.strip():
-        return None
+        return []
 
     start, end = token_bounds(query, cursor_pos)
     raw_token = query[start:end]
     stripped = strip_enclosing_quotes(raw_token)
     if not stripped:
-        return None
+        return []
 
     token_prefix = shell_unescape_fragment(stripped)
-    token_prefix_lower = token_prefix.lower()
-    matches: list[DirectoryListingEntry] = []
+    chosen_entries: list[DirectoryListingEntry] = []
     completed_prefix = ""
 
     if "/" in token_prefix:
@@ -863,14 +887,15 @@ def runtime_completion_match(
 
         cached_entries = cached_directory_listing(base_dir) if base_dir is not None else None
         if cached_entries is None:
-            return None
+            return []
 
-        name_prefix_lower = name_prefix.lower()
+        visible_entries: list[DirectoryListingEntry] = []
         for entry in cached_entries:
             if entry.name.startswith(".") and not name_prefix.startswith("."):
                 continue
-            if entry.name.lower().startswith(name_prefix_lower):
-                matches.append(entry)
+            visible_entries.append(entry)
+
+        chosen_entries = top_ranked_directory_entries(name_prefix, tuple(visible_entries))
 
         if display_prefix == "":
             completed_prefix = ""
@@ -884,42 +909,62 @@ def runtime_completion_match(
             completed_prefix = display_prefix.rstrip("/") + "/"
     else:
         if len(token_prefix) <= 2:
-            return None
+            return []
+        token_prefix_lower = token_prefix.lower()
+        matches: list[DirectoryListingEntry] = []
         for entry in startup_entries:
             if entry.name.startswith(".") and not token_prefix.startswith("."):
                 continue
             if entry.name.lower().startswith(token_prefix_lower):
                 matches.append(entry)
+        if not matches:
+            return []
+        matches.sort(key=lambda entry: (entry.name.lower(), entry.name))
+        chosen_entries = matches
 
-    if not matches:
-        return None
+    runtime_matches: list[MatchResult] = []
+    for chosen in chosen_entries:
+        completed_token = shell_escape_fragment(completed_prefix + chosen.name + ("/" if chosen.is_dir else ""))
+        completed_query = replace_query_token(query, cursor_pos, completed_token)
+        if completed_query == query:
+            continue
 
-    matches.sort(key=lambda entry: (entry.name.lower(), entry.name))
-    chosen = matches[0]
-    completed_token = shell_escape_fragment(completed_prefix + chosen.name + ("/" if chosen.is_dir else ""))
-    completed_query = replace_query_token(query, cursor_pos, completed_token)
-    if completed_query == query:
-        return None
+        completed_query_lower = completed_query.lower()
+        completed_match = flex_match(query, completed_query, candidate_lower=completed_query_lower)
+        completed_positions = completed_match.positions if completed_match is not None else []
+        token_match = flex_match(token_prefix, completed_token, candidate_lower=completed_token.lower())
+        if token_match is not None:
+            completed_positions = [start + pos for pos in token_match.positions]
 
-    return MatchResult(
-        text=completed_query,
-        score=10**9,
-        positions=[],
-        text_lower=completed_query.lower(),
-        runtime_completion=True,
-    )
+        runtime_matches.append(
+            MatchResult(
+                text=completed_query,
+                score=10**9,
+                positions=completed_positions,
+                text_lower=completed_query_lower,
+                runtime_completion=True,
+            )
+        )
+        if len(runtime_matches) >= limit:
+            break
+
+    return runtime_matches
 
 
-def insert_runtime_completion(results: list[MatchResult], runtime_completion: Optional[MatchResult]) -> list[MatchResult]:
-    if runtime_completion is None:
+def insert_runtime_completions(results: list[MatchResult], runtime_completions: list[MatchResult]) -> list[MatchResult]:
+    if not runtime_completions:
         return results
     merged = list(results)
     for index in range(min(2, len(merged))):
-        if merged[index].text == runtime_completion.text:
-            merged[index] = replace(merged[index], runtime_completion=True)
-            return merged
+        for runtime_completion in runtime_completions:
+            if merged[index].text == runtime_completion.text:
+                merged[index] = replace(merged[index], runtime_completion=True)
     insertion_index = min(2, len(merged))
-    merged.insert(insertion_index, runtime_completion)
+    for runtime_completion in runtime_completions:
+        if any(item.text == runtime_completion.text for item in merged):
+            continue
+        merged.insert(insertion_index, runtime_completion)
+        insertion_index += 1
     return merged
 
 
@@ -2691,13 +2736,19 @@ def run(
                         results = filter_exact_query_match(query, displayed_results)
                         matched_count = displayed_matched_count
                         total_count = displayed_total_count
-                    runtime_completion = runtime_completion_match(
+                    runtime_limit = 1
+                    if len(results) == 1:
+                        runtime_limit = 2
+                    elif not results:
+                        runtime_limit = 3
+                    runtime_completions = runtime_completion_matches(
                         query,
                         cursor_pos,
                         startup_entries,
                         cwd=current_cwd_path,
+                        limit=runtime_limit + 2,
                     )
-                    results = insert_runtime_completion(results, runtime_completion)
+                    results = insert_runtime_completions(results, runtime_completions[:runtime_limit])
                     if preferred_runtime_row is not None:
                         runtime_row = min(preferred_runtime_row, 2)
                         if 0 <= runtime_row < len(results) and results[runtime_row].runtime_completion:
