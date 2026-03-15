@@ -1783,11 +1783,11 @@ def render_result_line(
 
     if item.runtime_completion:
         if selected:
-            normal_style = RESET + style(fg_rgb=DORIC["fg_green"], bold=True)
-            match_style = RESET + style(fg_rgb=DORIC["fg_green"], bold=True, underline=True)
+            normal_style = RESET + style(fg=2, bold=True)
+            match_style = RESET + style(fg=2, bold=True, underline=True)
         else:
-            normal_style = RESET + style(fg_rgb=DORIC["fg_green"])
-            match_style = style(fg_rgb=DORIC["fg_green"], underline=True)
+            normal_style = RESET + style(fg=2)
+            match_style = style(fg=2, underline=True)
     else:
         if selected:
             normal_style = RESET + style(fg=1, bold=True)
@@ -1798,7 +1798,7 @@ def render_result_line(
         else:
             match_style = style(fg=1, underline=True)
 
-    selector_style = style(fg_rgb=DORIC["fg_green"], bold=True) if item.runtime_completion else style(fg=1, bold=True)
+    selector_style = style(fg=2, bold=True) if item.runtime_completion else style(fg=1, bold=True)
     connector_ch = connector[:1] or " "
     connector_style = selector_style if connector_active else ""
     connector_part = f"{connector_style}{connector_ch}{RESET}" if connector_style else connector_ch
