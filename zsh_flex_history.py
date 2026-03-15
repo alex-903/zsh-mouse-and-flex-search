@@ -960,10 +960,10 @@ def insert_runtime_completions(
     if not runtime_completions:
         return results
     merged = list(results)
-    for index in range(min(2, len(merged))):
-        for runtime_completion in runtime_completions:
-            if merged[index].text == runtime_completion.text:
-                merged[index] = replace(merged[index], runtime_completion=True)
+    runtime_texts = {item.text for item in runtime_completions}
+    for index, item in enumerate(merged):
+        if item.text in runtime_texts:
+            merged[index] = replace(item, runtime_completion=True)
     insertion_index = min(2, len(merged))
     for runtime_completion in runtime_completions[:featured_count]:
         if any(item.text == runtime_completion.text for item in merged):
