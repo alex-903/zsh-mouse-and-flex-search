@@ -951,7 +951,12 @@ def runtime_completion_matches(
     return runtime_matches
 
 
-def insert_runtime_completions(results: list[MatchResult], runtime_completions: list[MatchResult]) -> list[MatchResult]:
+def insert_runtime_completions(
+    results: list[MatchResult],
+    runtime_completions: list[MatchResult],
+    *,
+    featured_count: int,
+) -> list[MatchResult]:
     if not runtime_completions:
         return results
     merged = list(results)
@@ -960,11 +965,15 @@ def insert_runtime_completions(results: list[MatchResult], runtime_completions: 
             if merged[index].text == runtime_completion.text:
                 merged[index] = replace(merged[index], runtime_completion=True)
     insertion_index = min(2, len(merged))
-    for runtime_completion in runtime_completions:
+    for runtime_completion in runtime_completions[:featured_count]:
         if any(item.text == runtime_completion.text for item in merged):
             continue
         merged.insert(insertion_index, runtime_completion)
         insertion_index += 1
+    for runtime_completion in runtime_completions[featured_count:]:
+        if any(item.text == runtime_completion.text for item in merged):
+            continue
+        merged.append(runtime_completion)
     return merged
 
 
@@ -2751,9 +2760,13 @@ def run(
                         cursor_pos,
                         startup_entries,
                         cwd=current_cwd_path,
-                        limit=runtime_limit + 2,
+                        limit=MAX_RETURNED_RESULTS,
                     )
-                    results = insert_runtime_completions(results, runtime_completions[:runtime_limit])
+                    results = insert_runtime_completions(
+                        results,
+                        runtime_completions,
+                        featured_count=runtime_limit,
+                    )
                     if preferred_runtime_row is not None:
                         runtime_row = min(preferred_runtime_row, 2)
                         if 0 <= runtime_row < len(results) and results[runtime_row].runtime_completion:
