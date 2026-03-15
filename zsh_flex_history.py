@@ -1769,6 +1769,7 @@ def render_result_line(
     suffix_text: str = "",
     connector: str = " ",
     connector_active: bool = False,
+    connector_style_override: str = "",
 ) -> str:
     if width <= 0:
         return ""
@@ -1800,7 +1801,7 @@ def render_result_line(
 
     selector_style = style(fg=2, bold=True) if item.runtime_completion else style(fg=1, bold=True)
     connector_ch = connector[:1] or " "
-    connector_style = selector_style if connector_active else ""
+    connector_style = connector_style_override if connector_ch != " " else ""
     connector_part = f"{connector_style}{connector_ch}{RESET}" if connector_style else connector_ch
     if selected:
         gutter = f"{selector_style}{SELECTOR_GLYPH}{RESET}{connector_part}"
@@ -1924,6 +1925,9 @@ def draw_panel(
             max(0, visible_result_count - connector_count),
         )
     connector_end = connector_start + connector_count
+    selected_connector_style = ""
+    if selected_visible_index is not None and 0 <= selected < len(results):
+        selected_connector_style = style(fg=2, bold=True) if results[selected].runtime_completion else style(fg=1, bold=True)
 
     def connector_for_visible_row(row_index: int) -> str:
         if not (connector_start <= row_index < connector_end):
@@ -1969,6 +1973,7 @@ def draw_panel(
             suffix_text="",
             connector=connector_for_visible_row(i),
             connector_active=idx == selected,
+            connector_style_override=selected_connector_style,
         )
         result_lines.append(base_line)
 
