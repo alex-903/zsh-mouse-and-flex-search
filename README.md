@@ -2,7 +2,7 @@
 
 ![zsh flex history screenshot](./screenshot.png)
 
-A modernized terminal UI for searching zsh history with Emacs-style `flex` fuzzy matching, full mouse support for setting point and related interactions, and syntax highlighting; in `.zshrc`, wire it via a `zle-line-init` hook (for example, `fh-line-init`) to run at prompt initialization. It works in other shells too when invoked directly.
+A modernized terminal UI for searching zsh history with Emacs-style `flex` fuzzy matching, full mouse support for setting point and related interactions, and syntax highlighting; in `.zshrc`, wire it via a `zle-line-init` hook (for example, `fh-line-init`) to run at prompt initialization (see zshrc file for how to exit the program and execute the command). It works in other shells too when invoked directly.
 
 ## Run
 
