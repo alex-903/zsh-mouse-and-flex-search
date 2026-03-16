@@ -7,13 +7,7 @@ A modernized terminal UI for searching zsh history with Emacs-style `flex` fuzzy
 ## Run
 
 ```bash
-./zsh_flex_history.py
-```
-
-Or:
-
-```bash
-python3 zsh_flex_history.py
+./zsh_flex_history.py --use-custom-history --print-only
 ```
 
 ## Behavior
